@@ -7,13 +7,16 @@ import scala.tools.nsc.util.ClassPath._
 import scala.reflect.runtime.ReflectionUtils
 import scala.collection.mutable.ListBuffer
 import scala.compat.Platform.EOL
-import scala.reflect.internal.util.Statistics
+import scala.reflect.internal.util.{BatchSourceFile, SourceFile, Statistics}
 import scala.reflect.macros.util._
 import java.lang.{Class => jClass}
 import java.lang.reflect.{Array => jArray, Method => jMethod}
 import scala.reflect.internal.util.Collections._
 import scala.util.control.ControlThrowable
 import scala.reflect.macros.runtime.AbortMacroException
+import scala.tools.nsc.util.BatchSourceFile
+import java.io.{IOException, FileWriter}
+import scala.reflect.io.PlainFile
 
 /**
  *  Code to deal with macros, namely with:
@@ -704,6 +707,14 @@ trait Macros extends scala.tools.reflect.FastTrack with Traces {
               macroTraceVerbose(s"""${if (hasNewErrors) "failed to typecheck" else "successfully typechecked"} against $phase $pt:\n$result\n""")(result)
             }
 
+            val syntheticCodeBlock = ("{" + expanded.toString + "}", expandee.pos)
+            val sourceName = currentUnit.source.toString
+
+            macroDebugSyntheticCodeStorage get sourceName match {
+              case Some(lst) => lst append syntheticCodeBlock
+              case None => macroDebugSyntheticCodeStorage += (currentUnit.source.toString() -> ListBuffer(syntheticCodeBlock))
+            }
+
             var expectedTpe = expandee.tpe
             if (isNullaryInvocation(expandee)) expectedTpe = expectedTpe.finalResultType
             var typechecked = typecheck("macro def return type", expanded, expectedTpe)
@@ -884,4 +895,116 @@ object MacrosStats {
   import scala.reflect.internal.TypesStats.typerNanos
   val macroExpandCount    = Statistics.newCounter ("#macro expansions", "typer")
   val macroExpandNanos    = Statistics.newSubTimer("time spent in macroExpand", typerNanos)
+
+  abstract class MacroDebugCodeGenerator extends SubComponent  {
+    import scala.reflect.internal.util.OffsetPosition
+
+    val phaseName = "macrodebug"
+    val runsAfter = List[String]()
+    val runsRightAfter = Some("typer")
+
+    /** The phase factory */
+    def newPhase(prev: scala.tools.nsc.Phase) = new MacroDebugCodeGenerationPhase(prev)
+
+    private def adjustTreePositions(newSourceFile: SourceFile, shiftOffset: Int)(tree: global.Tree): Int = {
+      def shiftPosition(p: Position) = p match {
+        case range: RangePosition => new RangePosition(newSourceFile, range.start + shiftOffset,
+          range.point + shiftOffset, range.end + shiftOffset)
+        case offset: OffsetPosition => new OffsetPosition(newSourceFile, offset.point)
+        case a => a
+      }
+
+      def shiftTree(tr: global.Tree) {
+        if (tr.children.isEmpty) {
+          global.atPos(shiftPosition(tr.pos))(tr)
+        } else {
+          tr.children.foreach(ch => if (!ch.isEmpty) shiftTree(ch))
+        }
+      }
+
+      def adjustChildren(fun: global.Tree => Int, tr: global.Tree) =
+        (shiftOffset /: tr.children) {case (shft, c) => fun(c) + shft}
+
+      def adjustMacroPos(tr: global.Tree): Int = {
+        val newShift = tr.toString count (_ == '\n')
+
+        tr.children foreach { c =>
+          if (!(c.toString contains '\n')) {
+            if (!c.isEmpty) global.atPos(shiftPosition(c.pos))(c)
+          } else {
+            adjustChildren(adjustMacroPos, tr)
+          }
+        }
+
+        newShift
+      }
+
+      tree.attachments.get[global.MacroExpansionAttachment] match {
+        case Some(_) => adjustMacroPos(tree)
+        case None => adjustChildren(adjustTreePositions(newSourceFile, shiftOffset) _, tree)
+      }
+
+      shiftOffset
+    }
+
+    private def generateSyntheticSourceFile(cunit: global.CompilationUnit): Option[BatchSourceFile] = {
+      val cname = cunit.source.toString()
+
+      global.macroDebugSyntheticCodeStorage get cname match {
+        case Some(lst) =>
+          //don't care about path for now
+          val sourcePath = cunit.source.file.canonicalPath
+          val finalSourceFileName: String = sourcePath.substring(0, sourcePath lastIndexOf ".scala") + "_macro_debug$.scala"
+          val finalSourceFile = new java.io.File(finalSourceFileName)
+          val code = cunit.source.content
+          val expandedMacrosLength = (0 /: lst)(_ + _._1.length)
+
+          val finalSourceCodeLength = code.length + expandedMacrosLength
+          val finalSourceCodeChars = new Array[Char](finalSourceCodeLength)
+
+          ((0, 0) /: lst) {
+            case ((sourcePos, insertedMacrosLength), (expandedMacroSynSrc, macroPos)) =>
+              import scala.collection.convert._
+
+              System.arraycopy(code, sourcePos, finalSourceCodeChars, sourcePos + insertedMacrosLength,
+                macroPos.startOrPoint - sourcePos)
+              System.arraycopy(expandedMacroSynSrc.toCharArray, 0, finalSourceCodeChars,
+                macroPos.startOrPoint + insertedMacrosLength, expandedMacroSynSrc.length)
+
+              (macroPos.endOrPoint, insertedMacrosLength + expandedMacroSynSrc.length)
+          }
+
+          val (lastMacro, lastPos) = lst.last
+          System.arraycopy(code, lastPos.startOrPoint, finalSourceCodeChars, lastPos.startOrPoint + expandedMacrosLength, code.length - lastPos.startOrPoint)
+
+          try {
+            finalSourceFile.createNewFile()
+            val writer = new FileWriter(finalSourceFile)
+            writer.append(finalSourceCodeChars)
+            writer.flush()
+            writer.close()
+            println(finalSourceFile.getAbsolutePath)
+            Some(new BatchSourceFile(new PlainFile(scala.tools.nsc.io.Path.apply(finalSourceFile))))
+          }
+          catch {
+            case io: IOException => //todo something
+              return None
+          }
+
+        case n@None => n
+      }
+
+    }
+
+    class MacroDebugCodeGenerationPhase(prev: scala.tools.nsc.Phase) extends StdPhase(prev) {
+      def apply(unit: global.CompilationUnit) {
+        generateSyntheticSourceFile(unit) match {
+          case Some(file) =>
+            unit.source = file
+            adjustTreePositions(file, 0)(unit.body)
+          case None =>
+        }
+      }
+    }
+  }
 }
