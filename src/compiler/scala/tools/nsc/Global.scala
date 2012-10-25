@@ -1755,7 +1755,7 @@ class Global(var currentSettings: Settings, var reporter: Reporter)
   def createJavadoc    = false
 
   /** Synthetic macro code */
-  val macroDebugSyntheticCodeStorage = perRunCaches.newMap[String, ListBuffer[(String, Position)] ]()
+  val macroDebugSyntheticCodeStorage = perRunCaches.newMap[String, ListBuffer[(Tree, Position)] ]()
   @deprecated("Use forInteractive or forScaladoc, depending on what you're after", "2.9.0")
   def onlyPresentation = false
 }

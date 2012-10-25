@@ -742,7 +742,7 @@ trait Macros extends scala.tools.reflect.FastTrack with Traces {
               case a => new RangePosition(a.source, a.startOrPoint, a.startOrPoint, a.startOrPoint)
             }
 
-            val syntheticCodeBlock = (expanded.toString, debugPos)
+            val syntheticCodeBlock = (expanded, debugPos)
             val sourceName = currentUnit.source.toString
 
             macroDebugSyntheticCodeStorage get sourceName match {
@@ -820,7 +820,7 @@ trait Macros extends scala.tools.reflect.FastTrack with Traces {
               macroLogLite("" + expanded.tree + "\n" + showRaw(expanded.tree))
               val freeSyms = expanded.tree.freeTerms ++ expanded.tree.freeTypes
               freeSyms foreach (sym => MacroFreeSymbolError(expandee, sym))
-              Success(atPos(enclosingMacroPosition.focus)(expanded.tree updateAttachment MacroExpansionAttachment(expandee)))
+              Success(atPos(enclosingMacroPosition)(expanded.tree updateAttachment MacroExpansionAttachment(expandee)))
             case _ =>
               MacroExpansionIsNotExprError(expandee, expanded)
           }
@@ -1000,8 +1000,11 @@ object MacrosStats {
       }
 
       def adjustMacroPos(tr: global.Tree, startShift: Int): Int = {
+        var oldLength = 0
+
         tr pos_= (tr.pos match {
           case range: RangePosition =>
+            oldLength = range.end - range.start
             new RangePosition(newSourceFile, range.start + startShift, range.point + startShift,
               range.end + startShift + tr.toString.length - (range.start - range.end))
           case a => shiftPosition(a, startShift)
@@ -1010,7 +1013,7 @@ object MacrosStats {
 
         (startShift /: tr.children){ case (shift, child) => adjustMacroPos(child, shift) }
 
-        startShift + tr.toString.length
+        startShift + tr.toString.length - oldLength
       }
 
       def adjustSimplePos(tr: global.Tree, parents: List[global.Tree], startShift: Int) = {
@@ -1018,7 +1021,6 @@ object MacrosStats {
       }
 
       def adjustInner(child: global.Tree, parents: List[global.Tree], shiftOffset: Int): Int = {
-        child.isEmpty
         child.pos match {
           case _: RangePosition =>
           case offset: OffsetPosition if offset.point > codeLength =>
@@ -1058,15 +1060,16 @@ object MacrosStats {
 
           val (removedTreesLength, expandedMacrosLength) = ((0,0) /: lst) {
             case ((removedSource, addedSource), (expandedMacro, macroPos)) =>
-              (removedSource + (macroPos.endOrPoint - macroPos.startOrPoint), addedSource + expandedMacro.length)
+              (removedSource + (macroPos.endOrPoint - macroPos.startOrPoint), addedSource + expandedMacro.toString.length)
           }
 
           val finalSourceCodeMaxLength = code.length + expandedMacrosLength - removedTreesLength
           val finalSourceCodeChars = new Array[Char](finalSourceCodeMaxLength)
 
           val (sourcePos, generatedSourcePos) = ((0, 0) /: lst) {
-            case ((sourcePos, generatedSourcePos), (expandedMacroSynSrc, macroPos)) =>
+            case ((sourcePos, generatedSourcePos), (expandedMacroSyn, macroPos)) =>
               import scala.collection.convert._
+              val expandedMacroSynSrc = expandedMacroSyn.toString
 
               System.arraycopy(code, sourcePos, finalSourceCodeChars, generatedSourcePos,
                 macroPos.startOrPoint - sourcePos)
