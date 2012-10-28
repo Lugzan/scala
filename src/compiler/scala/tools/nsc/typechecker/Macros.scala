@@ -1016,10 +1016,6 @@ object MacrosStats {
         startShift + tr.toString.length - oldLength
       }
 
-      def adjustSimplePos(tr: global.Tree, parents: List[global.Tree], startShift: Int) = {
-        (startShift /: tr.children){case (shift, child) => adjustInner(child, parents, shift)}
-      }
-
       def adjustInner(child: global.Tree, parents: List[global.Tree], shiftOffset: Int): Int = {
         child.pos match {
           case _: RangePosition =>
@@ -1040,7 +1036,8 @@ object MacrosStats {
             macroShift
           case None =>
             child pos_= shiftPosition(child.pos, shiftOffset)
-            adjustSimplePos(child, parents :+ child, shiftOffset)
+            val newParents = parents :+ child
+            (shiftOffset /: child.children){case (shift,  c) => adjustInner(c, newParents, shift)}
         }
       }
 
@@ -1054,7 +1051,7 @@ object MacrosStats {
         case Some(lst) =>
           //don't care about path for now
           val sourcePath = cunit.source.file.canonicalPath
-          val finalSourceFileName: String = sourcePath.substring(0, sourcePath lastIndexOf ".scala") + "_macro_debug$.scala"
+          val finalSourceFileName: String = sourcePath.substring(0, sourcePath lastIndexOf ".scala") + "_macro_debug$.expanded"
           val finalSourceFile = new java.io.File(finalSourceFileName)
           val code = cunit.source.content
 
@@ -1069,7 +1066,9 @@ object MacrosStats {
           val (sourcePos, generatedSourcePos) = ((0, 0) /: lst) {
             case ((sourcePos, generatedSourcePos), (expandedMacroSyn, macroPos)) =>
               import scala.collection.convert._
-              val expandedMacroSynSrc = expandedMacroSyn.toString
+
+              //todo rename to class name (or rewrite toString)
+              val expandedMacroSynSrc = expandedMacroSyn.toString.replace("<init>", "_init_")
 
               System.arraycopy(code, sourcePos, finalSourceCodeChars, generatedSourcePos,
                 macroPos.startOrPoint - sourcePos)
@@ -1107,7 +1106,6 @@ object MacrosStats {
         generateSyntheticSourceFile(unit) match {
           case Some(file) =>
             unit.source = file
-//            adjustTreePositions2(file)(unit.body, 0)
             adjustTreePositions(file, unit.body)
           case None =>
         }
