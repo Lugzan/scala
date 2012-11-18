@@ -2388,10 +2388,13 @@ abstract class GenASM extends SubComponent with BytecodeWriters {
         debuglog("Generating code for block: " + b)
 
         // val lastInstr = b.lastInstruction
-
+//        println(">>> Instructions pos")
         for (instr <- b) {
 
           if(instr.pos.isDefined) {
+//            print(instr + "   ")
+//            println(instr.pos)
+
             val iPos = instr.pos
             val currentLineNr = iPos.line
             val skip = (currentLineNr == lastLineNr) // if(iPos.isRange) iPos.sameRange(lastPos) else
@@ -2938,7 +2941,10 @@ abstract class GenASM extends SubComponent with BytecodeWriters {
       jmethod.visitLabel(onePastLast)
 
       if(emitLines) {
-        for(LineNumberEntry(line, start) <- lnEntries.sortBy(_.start.getOffset)) { jmethod.visitLineNumber(line, start) }
+        for(LineNumberEntry(line, start) <- lnEntries.sortBy(_.start.getOffset)) {
+//          println(line + "  " + start)
+          jmethod.visitLineNumber(line, start)
+        }
       }
       if(emitVars)  { genLocalVariableTable() }
 

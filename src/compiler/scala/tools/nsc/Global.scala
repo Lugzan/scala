@@ -289,8 +289,7 @@ class Global(var currentSettings: Settings, var reporter: Reporter)
   }
 
   @inline final override def debuglog(msg: => String) {
-    if (settings.debug.value)
-      log(msg)
+      println(msg)
   }
 
   def logThrowable(t: Throwable): Unit = globalError(throwableAsString(t))

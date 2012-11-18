@@ -16,7 +16,7 @@ import scala.util.control.ControlThrowable
 import scala.reflect.macros.runtime.AbortMacroException
 import scala.tools.nsc.util.BatchSourceFile
 import java.io.{IOException, FileWriter}
-import scala.reflect.io.PlainFile
+import scala.reflect.io.{VirtualFile, PlainFile}
 
 /**
  *  Code to deal with macros, namely with:
@@ -1000,16 +1000,19 @@ object MacrosStats {
       }
 
       def adjustMacroPos(tr: global.Tree, startShift: Int): Int = {
+/*        println(s"Tree: ${tr.toString}${tr.pos}")
+        tr.children foreach {
+          c => println(c + " " + c.pos)
+        }*/
         var oldLength = 0
 
         tr pos_= (tr.pos match {
           case range: RangePosition =>
             oldLength = range.end - range.start
-            new RangePosition(newSourceFile, range.start + startShift, range.point + startShift,
-              range.end + startShift + tr.toString.length - (range.start - range.end))
+            new RangePosition(newSourceFile, range.start + startShift, range.start + startShift,
+              startShift + tr.toString.length + range.start)
           case a => shiftPosition(a, startShift)
         })
-
 
         (startShift /: tr.children){ case (shift, child) => adjustMacroPos(child, shift) }
 
@@ -1031,8 +1034,8 @@ object MacrosStats {
             shiftOffset
           case Some(_) =>
             val childOffset = child.pos.startOrPoint
-            val macroShift = adjustMacroPos(child, shiftOffset) - shiftOffset
-            parents foreach (p => p pos_= shiftRightEdge(p.pos, macroShift, childOffset))
+            val macroShift = adjustMacroPos(child, shiftOffset)
+            parents foreach (p => p pos_= shiftRightEdge(p.pos, macroShift - shiftOffset, childOffset))
             macroShift
           case None =>
             child pos_= shiftPosition(child.pos, shiftOffset)
@@ -1044,23 +1047,20 @@ object MacrosStats {
       adjustInner(tree, List[global.Tree](), 0)
     }
 
-    private def generateSyntheticSourceFile(cunit: global.CompilationUnit): Option[BatchSourceFile] = {
+    private def generateSyntheticSourceFile(cunit: global.CompilationUnit,
+                                            needOutputToConsole: Boolean): Option[BatchSourceFile] = {
       val cname = cunit.source.toString()
+      val macroPrefix = "<[[macro:"  //s
 
       global.macroDebugSyntheticCodeStorage get cname match {
         case Some(lst) =>
-          //don't care about path for now
           val sourcePath = cunit.source.file.canonicalPath
-          val finalSourceFileName: String = sourcePath.substring(0, sourcePath lastIndexOf ".scala") + "_macro_debug$.expanded"
-          val finalSourceFile = new java.io.File(finalSourceFileName)
           val code = cunit.source.content
 
-          val (removedTreesLength, expandedMacrosLength) = ((0,0) /: lst) {
-            case ((removedSource, addedSource), (expandedMacro, macroPos)) =>
-              (removedSource + (macroPos.endOrPoint - macroPos.startOrPoint), addedSource + expandedMacro.toString.length)
-          }
+          val genDelta =
+            (0 /: lst) {case (s, (expanded, pos)) => s + expanded.toString.length - pos.endOrPoint + pos.startOrPoint }
 
-          val finalSourceCodeMaxLength = code.length + expandedMacrosLength - removedTreesLength
+          val finalSourceCodeMaxLength = code.length + genDelta
           val finalSourceCodeChars = new Array[Char](finalSourceCodeMaxLength)
 
           val (sourcePos, generatedSourcePos) = ((0, 0) /: lst) {
@@ -1068,7 +1068,7 @@ object MacrosStats {
               import scala.collection.convert._
 
               //todo rename to class name (or rewrite toString)
-              val expandedMacroSynSrc = expandedMacroSyn.toString.replace("<init>", "_init_")
+              val expandedMacroSynSrc = expandedMacroSyn.toString.replace("<init>", "_init_").replace("scala.this.", "Predef.")
 
               System.arraycopy(code, sourcePos, finalSourceCodeChars, generatedSourcePos,
                 macroPos.startOrPoint - sourcePos)
@@ -1081,20 +1081,32 @@ object MacrosStats {
           val (_, lastPos) = lst.last
           System.arraycopy(code, sourcePos, finalSourceCodeChars, generatedSourcePos, code.length - lastPos.endOrPoint)
 
+          var result: Option[BatchSourceFile] = None
+
           try {
-            finalSourceFile.createNewFile()
-            val writer = new FileWriter(finalSourceFile)
-            writer.append(finalSourceCodeChars)
-            writer.flush()
-            writer.close()
-            println(finalSourceFile.getAbsolutePath)
-            Some(new BatchSourceFile(new PlainFile(scala.tools.nsc.io.Path.apply(finalSourceFile))))
-          }
-          catch {
+            val fileName = cunit.source.file.name
+            val virtualFinalSourceFile =
+              new VirtualFile(fileName.substring(0, fileName lastIndexOf ".scala") + "_macro_debug$.expanded")
+            result = Some(new BatchSourceFile(virtualFinalSourceFile, finalSourceCodeChars))
+          } catch {
             case io: IOException => //todo something
-              return None
           }
 
+          if (needOutputToConsole) {
+            val packedDebugInfo = new StringBuilder
+
+            lst foreach {
+              case (macroTree, pos) =>
+                packedDebugInfo ++= (macroTree.toString.length + ",") ++= (pos.startOrPoint + ",") ++= (pos.endOrPoint + "|")
+            }
+
+            println(macroPrefix + sourcePath)
+            finalSourceCodeChars mkString "" split "\n" foreach (line => println(macroPrefix + line))
+            println(macroPrefix + packedDebugInfo.toString)
+            println("all")
+          }
+
+          result
         case n@None => n
       }
 
@@ -1102,8 +1114,7 @@ object MacrosStats {
 
     class MacroDebugCodeGenerationPhase(prev: scala.tools.nsc.Phase) extends StdPhase(prev) {
       def apply(unit: global.CompilationUnit) {
-
-        generateSyntheticSourceFile(unit) match {
+        generateSyntheticSourceFile(unit, true) match {
           case Some(file) =>
             unit.source = file
             adjustTreePositions(file, unit.body)
