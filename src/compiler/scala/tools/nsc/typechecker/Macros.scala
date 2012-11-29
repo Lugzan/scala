@@ -1050,7 +1050,7 @@ object MacrosStats {
     private def generateSyntheticSourceFile(cunit: global.CompilationUnit,
                                             needOutputToConsole: Boolean): Option[BatchSourceFile] = {
       val cname = cunit.source.toString()
-      val macroPrefix = "<[[macro:"  //s
+      val macroPrefix = "<[[macro:"  //ug
 
       global.macroDebugSyntheticCodeStorage get cname match {
         case Some(lst) =>
@@ -1068,7 +1068,7 @@ object MacrosStats {
               import scala.collection.convert._
 
               //todo rename to class name (or rewrite toString)
-              val expandedMacroSynSrc = expandedMacroSyn.toString.replace("<init>", "_init_").replace("scala.this.", "Predef.")
+              val expandedMacroSynSrc = expandedMacroSyn.toString.replace("<init>", "_init_")
 
               System.arraycopy(code, sourcePos, finalSourceCodeChars, generatedSourcePos,
                 macroPos.startOrPoint - sourcePos)
@@ -1121,7 +1121,7 @@ object MacrosStats {
           case None =>
         }
 
-        debugToString(unit.body)
+//        debugToString(unit.body)
       }
     }
   }

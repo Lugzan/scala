@@ -1757,6 +1757,23 @@ class Global(var currentSettings: Settings, var reporter: Reporter)
   val macroDebugSyntheticCodeStorage = perRunCaches.newMap[String, ListBuffer[(Tree, Position)] ]()
   @deprecated("Use forInteractive or forScaladoc, depending on what you're after", "2.9.0")
   def onlyPresentation = false
+
+  def assemblyMacroError(pos: Position, msg: String): String = {
+    val sourceName = pos.source.toString()
+    val macroNameSuffix = "_macro_debug$.expanded"
+    val (fileName, isTyper) = if (sourceName endsWith macroNameSuffix)
+      ((sourceName stripSuffix macroNameSuffix) + ".scala", false) else (sourceName, true)
+
+    macroDebugSyntheticCodeStorage get fileName match {
+      case Some(lst) => lst foreach {
+          case (tree, treePos) => if (treePos.includes(pos)&&isTyper || !isTyper&&tree.pos.includes(pos)) {
+            return msg + "\nIn expanded macro:\n" + tree.toString + "\nIn expression: \n"
+          }
+        }
+        msg
+      case _ => msg
+    }
+  }
 }
 
 object Global {
