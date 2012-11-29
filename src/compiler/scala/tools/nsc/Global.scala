@@ -31,6 +31,8 @@ import backend.icode.analysis._
 import scala.language.postfixOps
 import scala.reflect.internal.StdAttachments
 import scala.reflect.ClassTag
+import scala.collection.mutable.ListBuffer
+import scala.tools.nsc.typechecker.MacrosStats.MacroDebugCodeGenerator
 
 class Global(var currentSettings: Settings, var reporter: Reporter)
     extends SymbolTable
@@ -287,8 +289,7 @@ class Global(var currentSettings: Settings, var reporter: Reporter)
   }
 
   @inline final override def debuglog(msg: => String) {
-    if (settings.debug.value)
-      log(msg)
+      println(msg)
   }
 
   def logThrowable(t: Throwable): Unit = globalError(throwableAsString(t))
@@ -444,6 +445,10 @@ class Global(var currentSettings: Settings, var reporter: Reporter)
   lazy val analyzer = new {
     val global: Global.this.type = Global.this
   } with Analyzer
+
+  object macrodebug extends {
+    val global: Global.this.type = Global.this
+  } with MacroDebugCodeGenerator
 
   // phaseName = "patmat"
   object patmat extends {
@@ -680,6 +685,7 @@ class Global(var currentSettings: Settings, var reporter: Reporter)
       analyzer.namerFactory   -> "resolve names, attach symbols to named trees",
       analyzer.packageObjects -> "load package objects",
       analyzer.typerFactory   -> "the meat and potatoes: type the trees",
+      macrodebug              -> "generate synthetic code from expanded macros for debug",
       patmat                  -> "translate match expressions",
       superAccessors          -> "add super accessors in traits and nested classes",
       extensionMethods        -> "add extension methods for inline classes",
@@ -1747,6 +1753,8 @@ class Global(var currentSettings: Settings, var reporter: Reporter)
   def forScaladoc      = onlyPresentation
   def createJavadoc    = false
 
+  /** Synthetic macro code */
+  val macroDebugSyntheticCodeStorage = perRunCaches.newMap[String, ListBuffer[(Tree, Position)] ]()
   @deprecated("Use forInteractive or forScaladoc, depending on what you're after", "2.9.0")
   def onlyPresentation = false
 }

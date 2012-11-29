@@ -7,13 +7,16 @@ import scala.tools.nsc.util.ClassPath._
 import scala.reflect.runtime.ReflectionUtils
 import scala.collection.mutable.ListBuffer
 import scala.compat.Platform.EOL
-import scala.reflect.internal.util.Statistics
+import scala.reflect.internal.util.{BatchSourceFile, SourceFile, Statistics}
 import scala.reflect.macros.util._
-import java.lang.{Class => jClass}
+import java.lang.{Class => jClass, StringBuffer}
 import java.lang.reflect.{Array => jArray, Method => jMethod}
 import scala.reflect.internal.util.Collections._
 import scala.util.control.ControlThrowable
 import scala.reflect.macros.runtime.AbortMacroException
+import scala.tools.nsc.util.BatchSourceFile
+import java.io.{IOException, FileWriter}
+import scala.reflect.io.{VirtualFile, PlainFile}
 
 /**
  *  Code to deal with macros, namely with:
@@ -704,6 +707,49 @@ trait Macros extends scala.tools.reflect.FastTrack with Traces {
               macroTraceVerbose(s"""${if (hasNewErrors) "failed to typecheck" else "successfully typechecked"} against $phase $pt:\n$result\n""")(result)
             }
 
+            def findEnd(tree: global.Tree, parent: global.Tree): Int = {
+              if (parent.children.last == tree) return -1
+
+              var siblings = parent.children
+              while (!siblings.isEmpty) {
+                val h = siblings.head
+                siblings = siblings.tail
+
+                if (h == tree) {
+                  return siblings.head.pos.startOrPoint
+                }
+              }
+
+              return -1
+            }
+
+            val debugPos = expandee.pos match {
+              case range: RangePosition => range
+              case off: OffsetPosition =>
+                var currentContext = typer.context
+                var parent = currentContext.tree
+                var children = expanded
+                var endPos = -1
+
+                while (endPos == -1 && currentContext != null && parent != null) {
+                  endPos = findEnd(children, parent)
+                  children = parent
+                  currentContext = currentContext.outer
+                  parent = if (currentContext != null) currentContext.tree else null
+                }
+                if (endPos < off.point) endPos = off.point
+                new RangePosition(off.source, off.point, off.point, endPos)
+              case a => new RangePosition(a.source, a.startOrPoint, a.startOrPoint, a.startOrPoint)
+            }
+
+            val syntheticCodeBlock = (expanded, debugPos)
+            val sourceName = currentUnit.source.toString
+
+            macroDebugSyntheticCodeStorage get sourceName match {
+              case Some(lst) => lst append syntheticCodeBlock
+              case None => macroDebugSyntheticCodeStorage += (currentUnit.source.toString() -> ListBuffer(syntheticCodeBlock))
+            }
+
             var expectedTpe = expandee.tpe
             if (isNullaryInvocation(expandee)) expectedTpe = expectedTpe.finalResultType
             var typechecked = typecheck("macro def return type", expanded, expectedTpe)
@@ -774,7 +820,7 @@ trait Macros extends scala.tools.reflect.FastTrack with Traces {
               macroLogLite("" + expanded.tree + "\n" + showRaw(expanded.tree))
               val freeSyms = expanded.tree.freeTerms ++ expanded.tree.freeTypes
               freeSyms foreach (sym => MacroFreeSymbolError(expandee, sym))
-              Success(atPos(enclosingMacroPosition.focus)(expanded.tree updateAttachment MacroExpansionAttachment(expandee)))
+              Success(atPos(enclosingMacroPosition)(expanded.tree updateAttachment MacroExpansionAttachment(expandee)))
             case _ =>
               MacroExpansionIsNotExprError(expandee, expanded)
           }
@@ -884,4 +930,199 @@ object MacrosStats {
   import scala.reflect.internal.TypesStats.typerNanos
   val macroExpandCount    = Statistics.newCounter ("#macro expansions", "typer")
   val macroExpandNanos    = Statistics.newSubTimer("time spent in macroExpand", typerNanos)
+
+  abstract class MacroDebugCodeGenerator extends SubComponent  {
+    import scala.reflect.internal.util.OffsetPosition
+
+    val phaseName = "macrodebug"
+    val runsAfter = List[String]()
+    val runsRightAfter = Some("typer")
+
+    /** The phase factory */
+    def newPhase(prev: scala.tools.nsc.Phase) = new MacroDebugCodeGenerationPhase(prev)
+
+    def debugToString(tr: global.Tree) {
+      val buffer = new StringBuffer()
+
+      def debugInner(tree: global.Tree) {
+        if (tree.toString.length < 10) {
+          try {
+            buffer append tree.toString append "   <[" append (tree.pos.toString) append "]>   \n"
+          }
+          catch {
+            case ignored: Exception =>
+          }
+        } else {
+          try {
+            buffer append tree.toString append "   <[" append (tree.pos.toString) append "]>   \n"
+          }
+          catch {
+            case e: Exception =>
+            println(tree.toString + s"   !!![${tree.pos.startOrPoint}||${tree.pos.endOrPoint}]  ${tree.pos.getClass}")
+          }
+
+          tree.children foreach {
+            debugInner(_)
+          }
+        }
+      }
+
+      debugInner(tr)
+
+      println(">>> Tree with positions after type checking: \n" + buffer.toString)
+    }
+
+    /**
+     * do nothing without -Yrangepos
+     */
+    private def adjustTreePositions(newSourceFile: SourceFile, tree: global.Tree) {
+      tree.pos match {
+        case range: RangePosition if range.startOrPoint != range.endOrPoint =>
+        case _ => return
+      }
+
+      val codeLength = newSourceFile.content.length
+
+      def shiftPosition(p: Position, shiftOff: Int) = p match {
+        case range: RangePosition =>
+          new RangePosition(newSourceFile, range.start + shiftOff, range.point + shiftOff, range.end + shiftOff)
+        case offset: OffsetPosition => new OffsetPosition(newSourceFile, offset.point + shiftOff)
+        case a => a
+      }
+
+      def shiftRightEdge(p: Position, shiftOff: Int, childOffset: Int) = {
+        lazy val point = if (p.point < childOffset) p.point else p.point + shiftOff
+        p match {
+          case range: RangePosition => new RangePosition(newSourceFile, range.start, point, range.end + shiftOff)
+          case offset: OffsetPosition => new OffsetPosition(newSourceFile, point)
+          case a => a
+        }
+      }
+
+      def adjustMacroPos(tr: global.Tree, startShift: Int): Int = {
+/*        println(s"Tree: ${tr.toString}${tr.pos}")
+        tr.children foreach {
+          c => println(c + " " + c.pos)
+        }*/
+        var oldLength = 0
+
+        tr pos_= (tr.pos match {
+          case range: RangePosition =>
+            oldLength = range.end - range.start
+            new RangePosition(newSourceFile, range.start + startShift, range.start + startShift,
+              startShift + tr.toString.length + range.start)
+          case a => shiftPosition(a, startShift)
+        })
+
+        (startShift /: tr.children){ case (shift, child) => adjustMacroPos(child, shift) }
+
+        startShift + tr.toString.length - oldLength
+      }
+
+      def adjustInner(child: global.Tree, parents: List[global.Tree], shiftOffset: Int): Int = {
+        child.pos match {
+          case _: RangePosition =>
+          case offset: OffsetPosition if offset.point > codeLength =>
+            child pos_= NoPosition
+            return shiftOffset  //todo why do we get OffsetPositions here?
+          case _ =>
+        }
+
+        child.attachments.get[global.MacroExpansionAttachment] match {
+          case _ if child.children.isEmpty =>
+            child pos_= shiftPosition(child.pos, shiftOffset)
+            shiftOffset
+          case Some(_) =>
+            val childOffset = child.pos.startOrPoint
+            val macroShift = adjustMacroPos(child, shiftOffset)
+            parents foreach (p => p pos_= shiftRightEdge(p.pos, macroShift - shiftOffset, childOffset))
+            macroShift
+          case None =>
+            child pos_= shiftPosition(child.pos, shiftOffset)
+            val newParents = parents :+ child
+            (shiftOffset /: child.children){case (shift,  c) => adjustInner(c, newParents, shift)}
+        }
+      }
+
+      adjustInner(tree, List[global.Tree](), 0)
+    }
+
+    private def generateSyntheticSourceFile(cunit: global.CompilationUnit,
+                                            needOutputToConsole: Boolean): Option[BatchSourceFile] = {
+      val cname = cunit.source.toString()
+      val macroPrefix = "<[[macro:"  //s
+
+      global.macroDebugSyntheticCodeStorage get cname match {
+        case Some(lst) =>
+          val sourcePath = cunit.source.file.canonicalPath
+          val code = cunit.source.content
+
+          val genDelta =
+            (0 /: lst) {case (s, (expanded, pos)) => s + expanded.toString.length - pos.endOrPoint + pos.startOrPoint }
+
+          val finalSourceCodeMaxLength = code.length + genDelta
+          val finalSourceCodeChars = new Array[Char](finalSourceCodeMaxLength)
+
+          val (sourcePos, generatedSourcePos) = ((0, 0) /: lst) {
+            case ((sourcePos, generatedSourcePos), (expandedMacroSyn, macroPos)) =>
+              import scala.collection.convert._
+
+              //todo rename to class name (or rewrite toString)
+              val expandedMacroSynSrc = expandedMacroSyn.toString.replace("<init>", "_init_").replace("scala.this.", "Predef.")
+
+              System.arraycopy(code, sourcePos, finalSourceCodeChars, generatedSourcePos,
+                macroPos.startOrPoint - sourcePos)
+              System.arraycopy(expandedMacroSynSrc.toCharArray, 0, finalSourceCodeChars,
+                generatedSourcePos + macroPos.startOrPoint - sourcePos, expandedMacroSynSrc.length)
+
+              (macroPos.end, generatedSourcePos + expandedMacroSynSrc.length + macroPos.startOrPoint - sourcePos)
+          }
+
+          val (_, lastPos) = lst.last
+          System.arraycopy(code, sourcePos, finalSourceCodeChars, generatedSourcePos, code.length - lastPos.endOrPoint)
+
+          var result: Option[BatchSourceFile] = None
+
+          try {
+            val fileName = cunit.source.file.name
+            val virtualFinalSourceFile =
+              new VirtualFile(fileName.substring(0, fileName lastIndexOf ".scala") + "_macro_debug$.expanded")
+            result = Some(new BatchSourceFile(virtualFinalSourceFile, finalSourceCodeChars))
+          } catch {
+            case io: IOException => //todo something
+          }
+
+          if (needOutputToConsole) {
+            val packedDebugInfo = new StringBuilder
+
+            lst foreach {
+              case (macroTree, pos) =>
+                packedDebugInfo ++= (macroTree.toString.length + ",") ++= (pos.startOrPoint + ",") ++= (pos.endOrPoint + "|")
+            }
+
+            println(macroPrefix + sourcePath)
+            finalSourceCodeChars mkString "" split "\n" foreach (line => println(macroPrefix + line))
+            println(macroPrefix + packedDebugInfo.toString)
+            println("all")
+          }
+
+          result
+        case n@None => n
+      }
+
+    }
+
+    class MacroDebugCodeGenerationPhase(prev: scala.tools.nsc.Phase) extends StdPhase(prev) {
+      def apply(unit: global.CompilationUnit) {
+        generateSyntheticSourceFile(unit, true) match {
+          case Some(file) =>
+            unit.source = file
+            adjustTreePositions(file, unit.body)
+          case None =>
+        }
+
+        debugToString(unit.body)
+      }
+    }
+  }
 }
