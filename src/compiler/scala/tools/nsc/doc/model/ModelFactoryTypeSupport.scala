@@ -1,4 +1,4 @@
-/* NSC -- new Scala compiler -- Copyright 2007-2012 LAMP/EPFL */
+/* NSC -- new Scala compiler -- Copyright 2007-2013 LAMP/EPFL */
 
 package scala.tools.nsc
 package doc
@@ -104,7 +104,7 @@ trait ModelFactoryTypeSupport {
                     if (!bSym.owner.isPackage)
                       Tooltip(name)
                     else
-                      findExternalLink(name).getOrElse (
+                      findExternalLink(bSym, name).getOrElse (
                         // (3) if we couldn't find neither the owner nor external URL to link to, show a tooltip with the qualified name
                         Tooltip(name)
                       )

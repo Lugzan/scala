@@ -1,5 +1,5 @@
 /* NSC -- new Scala compiler
- * Copyright 2005-2012 LAMP/EPFL
+ * Copyright 2005-2013 LAMP/EPFL
  * @author  Martin Odersky
  */
 
@@ -492,6 +492,10 @@ trait Trees extends api.Trees { self: SymbolTable =>
 
   case class TypeTree() extends TypTree with TypeTreeContextApi {
     private var orig: Tree = null
+    /** Was this type tree originally empty? That is, does it now contain
+      * an inferred type that must be forgotten in `resetAttrs` to
+      * enable retyping.
+      */
     private[scala] var wasEmpty: Boolean = false
 
     override def symbol = typeTreeSymbol(this) // if (tpe == null) null else tpe.typeSymbol
@@ -511,6 +515,15 @@ trait Trees extends api.Trees { self: SymbolTable =>
     override def defineType(tp: Type): this.type = {
       wasEmpty = isEmpty
       setType(tp)
+    }
+
+    override private[scala] def copyAttrs(tree: Tree) = {
+      super.copyAttrs(tree)
+      tree match {
+        case other: TypeTree => wasEmpty = other.wasEmpty // SI-6648 Critical for correct operation of `resetAttrs`.
+        case _ =>
+      }
+      this
     }
   }
   object TypeTree extends TypeTreeExtractor
@@ -1310,25 +1323,26 @@ trait Trees extends api.Trees { self: SymbolTable =>
   }
 
   class ChangeOwnerTraverser(val oldowner: Symbol, val newowner: Symbol) extends Traverser {
-    def changeOwner(tree: Tree) = tree match {
-      case Return(expr) =>
-        if (tree.symbol == oldowner) {
-          // SI-5612
-          if (newowner hasTransOwner oldowner)
-            log("NOT changing owner of %s because %s is nested in %s".format(tree, newowner, oldowner))
-          else {
-            log("changing owner of %s: %s => %s".format(tree, oldowner, newowner))
-            tree.symbol = newowner
-          }
-        }
-      case _: DefTree | _: Function =>
-        if (tree.symbol != NoSymbol && tree.symbol.owner == oldowner) {
-          tree.symbol.owner = newowner
-        }
-      case _ =>
+    final def change(sym: Symbol) = {
+      if (sym != NoSymbol && sym.owner == oldowner) 
+        sym.owner = newowner
     }
     override def traverse(tree: Tree) {
-      changeOwner(tree)
+      tree match {
+        case _: Return =>
+          if (tree.symbol == oldowner) {
+            // SI-5612
+            if (newowner hasTransOwner oldowner)
+              log("NOT changing owner of %s because %s is nested in %s".format(tree, newowner, oldowner))
+            else {
+              log("changing owner of %s: %s => %s".format(tree, oldowner, newowner))
+              tree.symbol = newowner
+            }
+          }
+        case _: DefTree | _: Function =>
+          change(tree.symbol)
+        case _ =>
+      }
       super.traverse(tree)
     }
   }

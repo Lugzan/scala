@@ -1,5 +1,5 @@
 /* NSC -- new Scala compiler
- * Copyright 2007-2012 LAMP/EPFL
+ * Copyright 2007-2013 LAMP/EPFL
  * @author  David Bernard, Manohar Jonnalagedda
  */
 
@@ -117,7 +117,7 @@ abstract class HtmlPage extends Page { thisPage =>
     case Underline(in) => <u>{ inlineToHtml(in) }</u>
     case Superscript(in) => <sup>{ inlineToHtml(in) }</sup>
     case Subscript(in) => <sub>{ inlineToHtml(in) }</sub>
-    case Link(raw, title) => <a href={ raw }>{ inlineToHtml(title) }</a>
+    case Link(raw, title) => <a href={ raw } target="_blank">{ inlineToHtml(title) }</a>
     case Monospace(in) => <code>{ inlineToHtml(in) }</code>
     case Text(text) => scala.xml.Text(text)
     case Summary(in) => inlineToHtml(in)

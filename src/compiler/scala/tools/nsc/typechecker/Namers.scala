@@ -1,5 +1,5 @@
 /* NSC -- new Scala compiler
- * Copyright 2005-2012 LAMP/EPFL
+ * Copyright 2005-2013 LAMP/EPFL
  * @author  Martin Odersky
  */
 
@@ -113,10 +113,8 @@ trait Namers extends MethodSynthesis {
       || (context.unit.isJava)
     )
     def noFinishGetterSetter(vd: ValDef) = (
-         vd.mods.isPrivateLocal
-      || vd.symbol.isModuleVar
-      || vd.symbol.isLazy
-    )
+         (vd.mods.isPrivateLocal && !vd.mods.isLazy) // all lazy vals need accessors, even private[this]
+      || vd.symbol.isModuleVar)
 
     def setPrivateWithin[T <: Symbol](tree: Tree, sym: T, mods: Modifiers): T =
       if (sym.isPrivateLocal || !mods.hasAccessBoundary) sym
@@ -393,6 +391,8 @@ trait Namers extends MethodSynthesis {
         && (clazz.sourceFile ne null)
         && (module.sourceFile ne null)
         && !(module isCoDefinedWith clazz)
+        && module.exists
+        && clazz.exists
       )
       if (fails) {
         context.unit.error(tree.pos, (
@@ -414,7 +414,7 @@ trait Namers extends MethodSynthesis {
      *  a module definition or a class definition.
      */
     def enterModuleSymbol(tree : ModuleDef): Symbol = {
-      var m: Symbol = context.scope.lookup(tree.name)
+      var m: Symbol = context.scope lookupAll tree.name find (_.isModule) getOrElse NoSymbol
       val moduleFlags = tree.mods.flags | MODULE
       if (m.isModule && !m.isPackage && inCurrentScope(m) && (currentRun.canRedefine(m) || m.isSynthetic)) {
         updatePosFlags(m, tree.pos, moduleFlags)
@@ -1305,7 +1305,8 @@ trait Namers extends MethodSynthesis {
           if (clazz.isDerivedValueClass) {
             log("Ensuring companion for derived value class " + name + " at " + cdef.pos.show)
             clazz setFlag FINAL
-            enclosingNamerWithScope(clazz.owner.info.decls).ensureCompanionObject(cdef)
+            // Don't force the owner's info lest we create cycles as in SI-6357.
+            enclosingNamerWithScope(clazz.owner.rawInfo.decls).ensureCompanionObject(cdef)
           }
           result
 

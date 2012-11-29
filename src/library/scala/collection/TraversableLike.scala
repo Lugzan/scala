@@ -1,6 +1,6 @@
 /*                     __                                               *\
 **     ________ ___   / /  ___     Scala API                            **
-**    / __/ __// _ | / /  / _ |    (c) 2003-2011, LAMP/EPFL             **
+**    / __/ __// _ | / /  / _ |    (c) 2003-2013, LAMP/EPFL             **
 **  __\ \/ /__/ __ |/ /__/ __ |    http://scala-lang.org/               **
 ** /____/\___/_/ |_/____/_/ | |                                         **
 **                          |/                                          **
@@ -86,7 +86,7 @@ trait TraversableLike[+A, +Repr] extends Any
   def repr: Repr = this.asInstanceOf[Repr]
 
   final def isTraversableAgain: Boolean = true
-
+  
   /** The underlying collection seen as an instance of `$Coll`.
    *  By default this is implemented as the current collection object itself,
    *  but this can be overridden.
@@ -174,7 +174,7 @@ trait TraversableLike[+A, +Repr] extends Any
    *
    *  @usecase def ++:[B](that: TraversableOnce[B]): $Coll[B]
    *    @inheritdoc
-   *
+   * 
    *    Example:
    *    {{{
    *      scala> val x = List(1)
@@ -271,12 +271,7 @@ trait TraversableLike[+A, +Repr] extends Any
    *  @return      a new $coll consisting of all elements of this $coll that do not satisfy the given
    *               predicate `p`. The order of the elements is preserved.
    */
-  def filterNot(p: A => Boolean): Repr = {
-    val b = newBuilder
-    for (x <- this)
-      if (!p(x)) b += x
-    b.result
-  }
+  def filterNot(p: A => Boolean): Repr = filter(!p(_))
 
   def collect[B, That](pf: PartialFunction[A, B])(implicit bf: CanBuildFrom[Repr, B, That]): That = {
     val b = bf(repr)
@@ -665,7 +660,6 @@ trait TraversableLike[+A, +Repr] extends Any
   def view = new TraversableView[A, Repr] {
     protected lazy val underlying = self.repr
     override def foreach[U](f: A => U) = self foreach f
-    override def isEmpty = self.isEmpty
   }
 
   /** Creates a non-strict view of a slice of this $coll.

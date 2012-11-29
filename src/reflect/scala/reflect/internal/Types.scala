@@ -1,5 +1,5 @@
 /* NSC -- new Scala compiler
- * Copyright 2005-2012 LAMP/EPFL
+ * Copyright 2005-2013 LAMP/EPFL
  * @author  Martin Odersky
  */
 
@@ -68,9 +68,9 @@ import util.ThreeValues._
     // a type variable
     // Replace occurrences of type parameters with type vars, where
     // inst is the instantiation and constr is a list of bounds.
-  case DeBruijnIndex(level, index)
+  case DeBruijnIndex(level, index, args)
     // for dependent method types: a type referring to a method parameter.
-  case ErasedValueType(clazz, underlying)
+  case ErasedValueType(tref)
     // only used during erasure of derived value classes.
 */
 
@@ -148,6 +148,7 @@ trait Types extends api.Types { self: SymbolTable =>
     /** Undo all changes to constraints to type variables upto `limit`. */
     //OPT this method is public so we can do `manual inlining`
     def undoTo(limit: UndoPairs) {
+      assertCorrectThread()
       while ((log ne limit) && log.nonEmpty) {
         val (tv, constr) = log.head
         tv.constr = constr
@@ -324,6 +325,18 @@ trait Types extends api.Types { self: SymbolTable =>
     def isSpliceable = {
       this.isInstanceOf[TypeRef] && typeSymbol.isAbstractType && !typeSymbol.isExistential
     }
+  }
+
+  /** Same as a call to narrow unless existentials are visible
+   *  after widening the type. In that case, narrow from the widened
+   *  type instead of the proxy. This gives buried existentials a
+   *  chance to make peace with the other types. See SI-5330.
+   */
+  private def narrowForFindMember(tp: Type): Type = {
+    val w = tp.widen
+    // Only narrow on widened type when we have to -- narrow is expensive unless the target is a singleton type.
+    if ((tp ne w) && containsExistential(w)) w.narrow
+    else tp.narrow
   }
 
   /** The base class for all types */
@@ -1080,7 +1093,7 @@ trait Types extends api.Types { self: SymbolTable =>
                          (other ne sym) &&
                          ((other.owner eq sym.owner) ||
                           (flags & PRIVATE) != 0 || {
-                             if (self eq null) self = this.narrow
+                             if (self eq null) self = narrowForFindMember(this)
                              if (symtpe eq null) symtpe = self.memberType(sym)
                              !(self.memberType(other) matches symtpe)
                           })}) {
@@ -1162,7 +1175,7 @@ trait Types extends api.Types { self: SymbolTable =>
                   if ((member ne sym) &&
                     ((member.owner eq sym.owner) ||
                       (flags & PRIVATE) != 0 || {
-                        if (self eq null) self = this.narrow
+                        if (self eq null) self = narrowForFindMember(this)
                         if (membertpe eq null) membertpe = self.memberType(member)
                         !(membertpe matches self.memberType(sym))
                       })) {
@@ -1177,7 +1190,7 @@ trait Types extends api.Types { self: SymbolTable =>
                     (other ne sym) &&
                       ((other.owner eq sym.owner) ||
                         (flags & PRIVATE) != 0 || {
-                          if (self eq null) self = this.narrow
+                          if (self eq null) self = narrowForFindMember(this)
                           if (symtpe eq null) symtpe = self.memberType(sym)
                           !(self.memberType(other) matches symtpe)
                              })}) {
@@ -1387,7 +1400,12 @@ trait Types extends api.Types { self: SymbolTable =>
   /** A class for this-types of the form <sym>.this.type
    */
   abstract case class ThisType(sym: Symbol) extends SingletonType with ThisTypeApi {
-    assert(sym.isClass, sym)
+    if (!sym.isClass) {
+      // SI-6640 allow StubSymbols to reveal what's missing from the classpath before we trip the assertion.
+      sym.failIfStub()
+      assert(false, sym)
+    }
+
     //assert(sym.isClass && !sym.isModuleClass || sym.isRoot, sym)
     override def isTrivial: Boolean = sym.isPackageClass
     override def isNotNull = true
@@ -1411,9 +1429,11 @@ trait Types extends api.Types { self: SymbolTable =>
   final class UniqueThisType(sym: Symbol) extends ThisType(sym) { }
 
   object ThisType extends ThisTypeExtractor {
-    def apply(sym: Symbol): Type =
-      if (phase.erasedTypes) sym.tpe
-      else unique(new UniqueThisType(sym))
+    def apply(sym: Symbol): Type = (
+      if (!phase.erasedTypes) unique(new UniqueThisType(sym))
+      else if (sym.isImplClass) sym.typeOfThis
+      else sym.tpe
+    )
   }
 
   /** A class for singleton types of the form `<prefix>.<sym.name>.type`.
@@ -3625,9 +3645,20 @@ trait Types extends api.Types { self: SymbolTable =>
 */
 
   /** A creator for type applications */
-  def appliedType(tycon: Type, args: List[Type]): Type =
-    if (args.isEmpty) tycon //@M! `if (args.isEmpty) tycon' is crucial (otherwise we create new types in phases after typer and then they don't get adapted (??))
-    else tycon match {
+  def appliedType(tycon: Type, args: List[Type]): Type = {
+    if (args.isEmpty)
+      return tycon //@M! `if (args.isEmpty) tycon' is crucial (otherwise we create new types in phases after typer and then they don't get adapted (??))
+
+    /** Disabled - causes cycles in tcpoly tests. */
+    if (false && isDefinitionsInitialized) {
+      assert(isUseableAsTypeArgs(args), {
+        val tapp_s = s"""$tycon[${args mkString ", "}]"""
+        val arg_s  = args filterNot isUseableAsTypeArg map (t => t + "/" + t.getClass) mkString ", "
+        s"$tapp_s includes illegal type argument $arg_s"
+      })
+    }
+
+    tycon match {
       case TypeRef(pre, sym @ (NothingClass|AnyClass), _) => copyTypeRef(tycon, pre, sym, Nil)   //@M drop type args to Any/Nothing
       case TypeRef(pre, sym, _)                           => copyTypeRef(tycon, pre, sym, args)
       case PolyType(tparams, restpe)                      => restpe.instantiateTypeParams(tparams, args)
@@ -3641,6 +3672,7 @@ trait Types extends api.Types { self: SymbolTable =>
       case WildcardType                                   => tycon // needed for neg/t0226
       case _                                              => abort(debugString(tycon))
     }
+  }
 
   /** Very convenient. */
   def appliedType(tyconSym: Symbol, args: Type*): Type =
@@ -3912,7 +3944,17 @@ trait Types extends api.Types { self: SymbolTable =>
     def avoidWiden: Boolean = avoidWidening
 
     def addLoBound(tp: Type, isNumericBound: Boolean = false) {
-      if (!lobounds.contains(tp)) {
+      // For some reason which is still a bit fuzzy, we must let Nothing through as
+      // a lower bound despite the fact that Nothing is always a lower bound.  My current
+      // supposition is that the side-effecting type constraint accumulation mechanism
+      // depends on these subtype tests being performed to make forward progress when
+      // there are mutally recursive type vars.
+      // See pos/t6367 and pos/t6499 for the competing test cases.
+      val mustConsider = tp.typeSymbol match {
+        case NothingClass => true
+        case _            => !(lobounds contains tp)
+      }
+      if (mustConsider) {
         if (isNumericBound && isNumericValueType(tp)) {
           if (numlo == NoType || isNumericSubType(numlo, tp))
             numlo = tp
@@ -3932,7 +3974,13 @@ trait Types extends api.Types { self: SymbolTable =>
     }
 
     def addHiBound(tp: Type, isNumericBound: Boolean = false) {
-      if (!hibounds.contains(tp)) {
+      // My current test case only demonstrates the need to let Nothing through as
+      // a lower bound, but I suspect the situation is symmetrical.
+      val mustConsider = tp.typeSymbol match {
+        case AnyClass => true
+        case _        => !(hibounds contains tp)
+      }
+      if (mustConsider) {
         checkWidening(tp)
         if (isNumericBound && isNumericValueType(tp)) {
           if (numhi == NoType || isNumericSubType(tp, numhi))
@@ -5748,6 +5796,100 @@ trait Types extends api.Types { self: SymbolTable =>
     case _ => false
   }
 
+  /** This is defined and named as it is because the goal is to exclude source
+   *  level types which are not value types (e.g. MethodType) without excluding
+   *  necessary internal types such as WildcardType.  There are also non-value
+   *  types which can be used as type arguments (e.g. type constructors.)
+   */
+  def isUseableAsTypeArg(tp: Type) = (
+       isInternalTypeUsedAsTypeArg(tp)  // the subset of internal types which can be type args
+    || isHKTypeRef(tp)                  // not a value type, but ok as a type arg
+    || isValueElseNonValue(tp)          // otherwise only value types
+  )
+
+  private def isHKTypeRef(tp: Type) = tp match {
+    case TypeRef(_, sym, Nil) => tp.isHigherKinded
+    case _                    => false
+  }
+  @tailrec final def isUseableAsTypeArgs(tps: List[Type]): Boolean = tps match {
+    case Nil     => true
+    case x :: xs => isUseableAsTypeArg(x) && isUseableAsTypeArgs(xs)
+  }
+
+  /** The "third way", types which are neither value types nor
+   *  non-value types as defined in the SLS, further divided into
+   *  types which are used internally in type applications and
+   *  types which are not.
+   */
+  private def isInternalTypeNotUsedAsTypeArg(tp: Type): Boolean = tp match {
+    case AntiPolyType(pre, targs)            => true
+    case ClassInfoType(parents, defs, clazz) => true
+    case DeBruijnIndex(level, index, args)   => true
+    case ErasedValueType(tref)               => true
+    case NoPrefix                            => true
+    case NoType                              => true
+    case SuperType(thistpe, supertpe)        => true
+    case TypeBounds(lo, hi)                  => true
+    case _                                   => false
+  }
+  private def isInternalTypeUsedAsTypeArg(tp: Type): Boolean = tp match {
+    case WildcardType           => true
+    case BoundedWildcardType(_) => true
+    case ErrorType              => true
+    case _: TypeVar             => true
+    case _                      => false
+  }
+  private def isAlwaysValueType(tp: Type) = tp match {
+    case RefinedType(_, _)       => true
+    case ExistentialType(_, _)   => true
+    case ConstantType(_)         => true
+    case _                       => false
+  }
+  private def isAlwaysNonValueType(tp: Type) = tp match {
+    case OverloadedType(_, _)          => true
+    case NullaryMethodType(_)          => true
+    case MethodType(_, _)              => true
+    case PolyType(_, MethodType(_, _)) => true
+    case _                             => false
+  }
+  /** Should be called only with types for which a clear true/false answer
+   *  can be given: true == value type, false == non-value type.  Otherwise,
+   *  an exception is thrown.
+   */
+  private def isValueElseNonValue(tp: Type): Boolean = tp match {
+    case tp if isAlwaysValueType(tp)           => true
+    case tp if isAlwaysNonValueType(tp)        => false
+    case AnnotatedType(_, underlying, _)       => isValueElseNonValue(underlying)
+    case SingleType(_, sym)                    => sym.isValue           // excludes packages and statics
+    case TypeRef(_, _, _) if tp.isHigherKinded => false                 // excludes type constructors
+    case ThisType(sym)                         => !sym.isPackageClass   // excludes packages
+    case TypeRef(_, sym, _)                    => !sym.isPackageClass   // excludes packages
+    case PolyType(_, _)                        => true                  // poly-methods excluded earlier
+    case tp                                    => sys.error("isValueElseNonValue called with third-way type " + tp)
+  }
+
+  /** SLS 3.2, Value Types
+   *  Is the given type definitely a value type? A true result means
+   *  it verifiably is, but a false result does not mean it is not,
+   *  only that it cannot be assured.  To avoid false positives, this
+   *  defaults to false, but since Type is not sealed, one should take
+   *  a false answer with a grain of salt.  This method may be primarily
+   *  useful as documentation; it is likely that !isNonValueType(tp)
+   *  will serve better than isValueType(tp).
+   */
+  def isValueType(tp: Type) = isValueElseNonValue(tp)
+
+  /** SLS 3.3, Non-Value Types
+   *  Is the given type definitely a non-value type, as defined in SLS 3.3?
+   *  The specification-enumerated non-value types are method types, polymorphic
+   *  method types, and type constructors.  Supplements to the specified set of
+   *  non-value types include: types which wrap non-value symbols (packages
+   *  abd statics), overloaded types. Varargs and by-name types T* and (=>T) are
+   *  not designated non-value types because there is code which depends on using
+   *  them as type arguments, but their precise status is unclear.
+   */
+  def isNonValueType(tp: Type) = !isValueElseNonValue(tp)
+
   def isNonRefinementClassType(tpe: Type) = tpe match {
     case SingleType(_, sym) => sym.isModuleClass
     case TypeRef(_, sym, _) => sym.isClass && !sym.isRefinementClass
@@ -6226,21 +6368,26 @@ trait Types extends api.Types { self: SymbolTable =>
         })
         if (!cyclic) {
           if (up) {
-            if (bound.typeSymbol != AnyClass)
+            if (bound.typeSymbol != AnyClass) {
+              log(s"$tvar addHiBound $bound.instantiateTypeParams($tparams, $tvars)")
               tvar addHiBound bound.instantiateTypeParams(tparams, tvars)
+            }
             for (tparam2 <- tparams)
               tparam2.info.bounds.lo.dealias match {
                 case TypeRef(_, `tparam`, _) =>
+                  log(s"$tvar addHiBound $tparam2.tpeHK.instantiateTypeParams($tparams, $tvars)")
                   tvar addHiBound tparam2.tpeHK.instantiateTypeParams(tparams, tvars)
                 case _ =>
               }
           } else {
             if (bound.typeSymbol != NothingClass && bound.typeSymbol != tparam) {
+              log(s"$tvar addLoBound $bound.instantiateTypeParams($tparams, $tvars)")
               tvar addLoBound bound.instantiateTypeParams(tparams, tvars)
             }
             for (tparam2 <- tparams)
               tparam2.info.bounds.hi.dealias match {
                 case TypeRef(_, `tparam`, _) =>
+                  log(s"$tvar addLoBound $tparam2.tpeHK.instantiateTypeParams($tparams, $tvars)")
                   tvar addLoBound tparam2.tpeHK.instantiateTypeParams(tparams, tvars)
                 case _ =>
               }
@@ -6249,14 +6396,15 @@ trait Types extends api.Types { self: SymbolTable =>
         tvar.constr.inst = NoType // necessary because hibounds/lobounds may contain tvar
 
         //println("solving "+tvar+" "+up+" "+(if (up) (tvar.constr.hiBounds) else tvar.constr.loBounds)+((if (up) (tvar.constr.hiBounds) else tvar.constr.loBounds) map (_.widen)))
-
-        tvar setInst (
+        val newInst = (
           if (up) {
             if (depth != AnyDepth) glb(tvar.constr.hiBounds, depth) else glb(tvar.constr.hiBounds)
           } else {
             if (depth != AnyDepth) lub(tvar.constr.loBounds, depth) else lub(tvar.constr.loBounds)
-          })
-
+          }
+        )
+        log(s"$tvar setInst $newInst")
+        tvar setInst newInst
         //Console.println("solving "+tvar+" "+up+" "+(if (up) (tvar.constr.hiBounds) else tvar.constr.loBounds)+((if (up) (tvar.constr.hiBounds) else tvar.constr.loBounds) map (_.widen))+" = "+tvar.constr.inst)//@MDEBUG
       }
     }

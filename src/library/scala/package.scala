@@ -1,6 +1,6 @@
 /*                     __                                               *\
 **     ________ ___   / /  ___     Scala API                            **
-**    / __/ __// _ | / /  / _ |    (c) 2003-2011, LAMP/EPFL             **
+**    / __/ __// _ | / /  / _ |    (c) 2003-2013, LAMP/EPFL             **
 **  __\ \/ /__/ __ |/ /__/ __ |    http://scala-lang.org/               **
 ** /____/\___/_/ |_/____/_/ | |                                         **
 **                          |/                                          **
@@ -95,7 +95,10 @@ package object scala {
   val Equiv = scala.math.Equiv
 
   type Fractional[T] = scala.math.Fractional[T]
+  val Fractional = scala.math.Fractional
+
   type Integral[T] = scala.math.Integral[T]
+  val Integral = scala.math.Integral
 
   type Numeric[T] = scala.math.Numeric[T]
   val Numeric = scala.math.Numeric

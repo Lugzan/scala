@@ -1,6 +1,6 @@
 /*                     __                                               *\
 **     ________ ___   / /  ___     Scala API                            **
-**    / __/ __// _ | / /  / _ |    (c) 2003-2011, LAMP/EPFL             **
+**    / __/ __// _ | / /  / _ |    (c) 2003-2013, LAMP/EPFL             **
 **  __\ \/ /__/ __ |/ /__/ __ |    http://scala-lang.org/               **
 ** /____/\___/_/ |_/____/_/ | |                                         **
 **                          |/                                          **
@@ -139,7 +139,7 @@ override def companion: GenericCompanion[Vector] = Vector
     if (bf eq IndexedSeq.ReusableCBF) appendFront(elem).asInstanceOf[That] // just ignore bf
     else super.+:(elem)(bf)
 
-  override def :+[B >: A, That](elem: B)(implicit bf: CanBuildFrom[Vector[A], B, That]): That =
+  override def :+[B >: A, That](elem: B)(implicit bf: CanBuildFrom[Vector[A], B, That]): That = 
     if (bf eq IndexedSeq.ReusableCBF) appendBack(elem).asInstanceOf[That] // just ignore bf
     else super.:+(elem)(bf)
 

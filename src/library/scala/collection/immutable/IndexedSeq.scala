@@ -1,6 +1,6 @@
 /*                     __                                               *\
 **     ________ ___   / /  ___     Scala API                            **
-**    / __/ __// _ | / /  / _ |    (c) 2003-2011, LAMP/EPFL             **
+**    / __/ __// _ | / /  / _ |    (c) 2003-2013, LAMP/EPFL             **
 **  __\ \/ /__/ __ |/ /__/ __ |    http://scala-lang.org/               **
 ** /____/\___/_/ |_/____/_/ | |                                         **
 **                          |/                                          **
@@ -37,7 +37,6 @@ object IndexedSeq extends IndexedSeqFactory[IndexedSeq] {
     def apply(idx: Int) = buf.apply(idx)
   }
   def newBuilder[A]: Builder[A, IndexedSeq[A]] = Vector.newBuilder[A]
-
   implicit def canBuildFrom[A]: CanBuildFrom[Coll, A, IndexedSeq[A]] =
     ReusableCBF.asInstanceOf[GenericCanBuildFrom[A]]
 }

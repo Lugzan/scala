@@ -1,5 +1,5 @@
 /* NSC -- new Scala compiler
- * Copyright 2005-2012 LAMP/EPFL
+ * Copyright 2005-2013 LAMP/EPFL
  * @author  Martin Odersky
  */
 
@@ -176,7 +176,7 @@ abstract class RefChecks extends InfoTransform with scala.reflect.internal.trans
         def varargBridge(member: Symbol, bridgetpe: Type): Tree = {
           log("Generating varargs bridge for " + member.fullLocationString + " of type " + bridgetpe)
 
-          val bridge = member.cloneSymbolImpl(clazz, member.flags | VBRIDGE | ARTIFACT) setPos clazz.pos
+          val bridge = member.cloneSymbolImpl(clazz, member.flags | VBRIDGE) setPos clazz.pos
           bridge.setInfo(bridgetpe.cloneInfo(bridge))
           clazz.info.decls enter bridge
 
@@ -556,13 +556,13 @@ abstract class RefChecks extends InfoTransform with scala.reflect.internal.trans
               def uncurryAndErase(tp: Type) = erasure.erasure(sym)(uncurry.transformInfo(sym, tp))
               val tp1 = uncurryAndErase(clazz.thisType.memberType(sym))
               val tp2 = uncurryAndErase(clazz.thisType.memberType(other))
-              exitingErasure(tp1 matches tp2)
+              afterErasure(tp1 matches tp2)
             })
 
         def ignoreDeferred(member: Symbol) = (
           (member.isAbstractType && !member.isFBounded) || (
             member.isJavaDefined &&
-            // the test requires exitingErasure so shouldn't be
+            // the test requires afterErasure so shouldn't be
             // done if the compiler has no erasure phase available
             (currentRun.erasurePhase == NoPhase || javaErasedOverridingSym(member) != NoSymbol)
           )
@@ -905,15 +905,13 @@ abstract class RefChecks extends InfoTransform with scala.reflect.internal.trans
          *  the type occurs itself at variance position given by `variance`
          */
         def validateVariance(tp: Type, variance: Int): Unit = tp match {
-          case ErrorType =>
-          case WildcardType =>
-          case BoundedWildcardType(bounds) =>
-            validateVariance(bounds, variance)
-          case NoType =>
-          case NoPrefix =>
-          case ThisType(_) =>
-          case ConstantType(_) =>
-          // case DeBruijnIndex(_, _) =>
+          case ErrorType => ;
+          case WildcardType => ;
+          case NoType => ;
+          case NoPrefix => ;
+          case ThisType(_) => ;
+          case ConstantType(_) => ;
+          // case DeBruijnIndex(_, _) => ;
           case SingleType(pre, sym) =>
             validateVariance(pre, variance)
           case TypeRef(pre, sym, args) =>
@@ -1026,15 +1024,18 @@ abstract class RefChecks extends InfoTransform with scala.reflect.internal.trans
     private def enterSyms(stats: List[Tree]) {
       var index = -1
       for (stat <- stats) {
-        index = index + 1;
+        index = index + 1
+        def enterSym(sym: Symbol) = if (sym.isLocal) {
+          currentLevel.scope.enter(sym)
+          symIndex(sym) = index
+        }
+
         stat match {
+          case DefDef(_, _, _, _, _, _) if stat.symbol.isLazy                 =>
+            enterSym(stat.symbol)
           case ClassDef(_, _, _, _) | DefDef(_, _, _, _, _, _) | ModuleDef(_, _, _) | ValDef(_, _, _, _) =>
             //assert(stat.symbol != NoSymbol, stat);//debug
-            val sym = stat.symbol.lazyAccessorOrSelf
-            if (sym.isLocal) {
-              currentLevel.scope.enter(sym)
-              symIndex(sym) = index;
-            }
+            enterSym(stat.symbol.lazyAccessorOrSelf)
           case _ =>
         }
       }
@@ -1271,7 +1272,7 @@ abstract class RefChecks extends InfoTransform with scala.reflect.internal.trans
           case vsym     => ValDef(vsym)
         }
       }
-      def createStaticModuleAccessor() = exitingRefchecks {
+      def createStaticModuleAccessor() = afterRefchecks {
         val method = (
           sym.owner.newMethod(sym.name.toTermName, sym.pos, (sym.flags | STABLE) & ~MODULE)
             setInfoAndEnter NullaryMethodType(sym.moduleClass.tpe)
@@ -1282,7 +1283,7 @@ abstract class RefChecks extends InfoTransform with scala.reflect.internal.trans
         vdef,
         localTyper.typedPos(tree.pos) {
           val vsym = vdef.symbol
-          exitingRefchecks {
+          afterRefchecks {
             val rhs  = gen.newModule(sym, vsym.tpe)
             val body = if (sym.owner.isTrait) rhs else gen.mkAssignAndReturn(vsym, rhs)
             DefDef(sym, body.changeOwner(vsym -> sym))
@@ -1299,34 +1300,6 @@ abstract class RefChecks extends InfoTransform with scala.reflect.internal.trans
       })
     }
 
-    /** Implements lazy value accessors:
-     *    - for lazy values of type Unit and all lazy fields inside traits,
-     *      the rhs is the initializer itself
-     *    - for all other lazy values z the accessor is a block of this form:
-     *      { z = <rhs>; z } where z can be an identifier or a field.
-     */
-    private def makeLazyAccessor(tree: Tree, rhs: Tree): List[Tree] = {
-      val vsym        = tree.symbol
-      assert(vsym.isTerm, vsym)
-      val hasUnitType = vsym.tpe.typeSymbol == UnitClass
-      val lazySym     = vsym.lazyAccessor
-      assert(lazySym != NoSymbol, vsym)
-
-      // for traits, this is further transformed in mixins
-      val body = (
-        if (tree.symbol.owner.isTrait || hasUnitType) rhs
-        else gen.mkAssignAndReturn(vsym, rhs)
-      )
-      val lazyDef = atPos(tree.pos)(DefDef(lazySym, body.changeOwner(vsym -> lazySym)))
-      debuglog("Created lazy accessor: " + lazyDef)
-
-      if (hasUnitType) List(typed(lazyDef))
-      else List(
-        typed(ValDef(vsym)),
-        exitingRefchecks(typed(lazyDef))
-      )
-    }
-
     def transformStat(tree: Tree, index: Int): List[Tree] = tree match {
       case t if treeInfo.isSelfConstrCall(t) =>
         assert(index == 0, index)
@@ -1339,8 +1312,7 @@ abstract class RefChecks extends InfoTransform with scala.reflect.internal.trans
       case ModuleDef(_, _, _) => eliminateModuleDefs(tree)
       case ValDef(_, _, _, _) =>
         val tree1 @ ValDef(_, _, _, rhs) = transform(tree) // important to do before forward reference check
-        if (tree.symbol.isLazy)
-          makeLazyAccessor(tree, rhs)
+        if (tree1.symbol.isLazy) tree1 :: Nil
         else {
           val lazySym = tree.symbol.lazyAccessorOrSelf
           if (lazySym.isLocal && index <= currentLevel.maxindex) {
@@ -1402,6 +1374,16 @@ abstract class RefChecks extends InfoTransform with scala.reflect.internal.trans
         unit.warning(pos, "%s has changed semantics in version %s:\n%s".format(
           sym.fullLocationString, sym.migrationVersion.get, sym.migrationMessage.get)
         )
+    }
+
+    private def checkCompileTimeOnly(sym: Symbol, pos: Position) = {
+      if (sym.isCompileTimeOnly) {
+        def defaultMsg =
+          sm"""Reference to ${sym.fullLocationString} should not have survived past type checking,
+              |it should have been processed and eliminated during expansion of an enclosing macro."""
+        // The getOrElse part should never happen, it's just here as a backstop.
+        unit.error(pos, sym.compileTimeOnlyMessage getOrElse defaultMsg)
+      }
     }
 
     private def lessAccessible(otherSym: Symbol, memberSym: Symbol): Boolean = (
@@ -1590,6 +1572,7 @@ abstract class RefChecks extends InfoTransform with scala.reflect.internal.trans
       checkDeprecated(sym, tree.pos)
       if (settings.Xmigration28.value)
         checkMigration(sym, tree.pos)
+      checkCompileTimeOnly(sym, tree.pos)
 
       if (sym eq NoSymbol) {
         unit.warning(tree.pos, "Select node has NoSymbol! " + tree + " / " + tree.tpe)

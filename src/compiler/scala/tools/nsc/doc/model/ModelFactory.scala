@@ -1,4 +1,4 @@
-/* NSC -- new Scala compiler -- Copyright 2007-2012 LAMP/EPFL */
+/* NSC -- new Scala compiler -- Copyright 2007-2013 LAMP/EPFL */
 
 package scala.tools.nsc
 package doc
@@ -28,8 +28,14 @@ class ModelFactory(val global: Global, val settings: doc.Settings) {
                with MemberLookup =>
 
   import global._
-  import definitions.{ ObjectClass, NothingClass, AnyClass, AnyValClass, AnyRefClass }
+  import definitions.{ ObjectClass, NothingClass, AnyClass, AnyValClass, AnyRefClass, ListClass }
   import rootMirror.{ RootPackage, RootClass, EmptyPackage }
+
+  // Defaults for member grouping, that may be overridden by the template
+  val defaultGroup = "Ungrouped"
+  val defaultGroupName = "Ungrouped"
+  val defaultGroupDesc = None
+  val defaultGroupPriority = 1000
 
   def templatesCount = docTemplatesCache.count(_._2.isDocTemplate) - droppedPackages.size
 
@@ -121,14 +127,18 @@ class ModelFactory(val global: Global, val settings: doc.Settings) {
       }
       if (inTpl != null) thisFactory.comment(sym, thisTpl, inTpl) else None
     }
-    def group = comment flatMap (_.group) getOrElse "No Group"
+    def group = if (comment.isDefined) comment.get.group.getOrElse(defaultGroup) else defaultGroup
     override def inTemplate = inTpl
     override def toRoot: List[MemberImpl] = this :: inTpl.toRoot
-    def inDefinitionTemplates =
-        if (inTpl == null)
-          List(makeRootPackage)
-        else
-          makeTemplate(sym.owner)::(sym.allOverriddenSymbols map { inhSym => makeTemplate(inhSym.owner) })
+    def inDefinitionTemplates = this match {
+        case mb: NonTemplateMemberEntity if (mb.useCaseOf.isDefined) =>
+          mb.useCaseOf.get.inDefinitionTemplates
+        case _ =>
+          if (inTpl == null)
+            List(makeRootPackage)
+          else
+            makeTemplate(sym.owner)::(sym.allOverriddenSymbols map { inhSym => makeTemplate(inhSym.owner) })
+      }
     def visibility = {
       if (sym.isPrivateLocal) PrivateInInstance()
       else if (sym.isProtectedLocal) ProtectedInInstance()
@@ -139,10 +149,8 @@ class ModelFactory(val global: Global, val settings: doc.Settings) {
           else None
         if (sym.isPrivate) PrivateInTemplate(inTpl)
         else if (sym.isProtected) ProtectedInTemplate(qual getOrElse inTpl)
-        else qual match {
-          case Some(q) => PrivateInTemplate(q)
-          case None => Public()
-        }
+        else if (qual.isDefined) PrivateInTemplate(qual.get)
+        else Public()
       }
     }
     def flags = {
@@ -284,7 +292,8 @@ class ModelFactory(val global: Global, val settings: doc.Settings) {
         val tps = (this match {
           case a: AliasType => sym.tpe.dealias.parents
           case a: AbstractType => sym.info.bounds match {
-            case TypeBounds(lo, hi) => List(hi)
+            case TypeBounds(lo, RefinedType(parents, decls)) => parents
+            case TypeBounds(lo, hi) => hi :: Nil
             case _ => Nil
           }
           case _ => sym.tpe.parents
@@ -484,23 +493,16 @@ class ModelFactory(val global: Global, val settings: doc.Settings) {
     def inheritanceDiagram = makeInheritanceDiagram(this)
     def contentDiagram = makeContentDiagram(this)
 
-    def groupSearch[T](extractor: Comment => T, default: T): T = {
-      // query this template
-      for (c <- comment) {
-        val entity = extractor(c)
-        if (entity != default) return entity
+    def groupSearch[T](extractor: Comment => Option[T]): Option[T] = {
+      val comments = comment +: linearizationTemplates.collect { case dtpl: DocTemplateImpl => dtpl.comment }
+      comments.flatten.map(extractor).flatten.headOption orElse {
+        Option(inTpl) flatMap (_.groupSearch(extractor))
       }
-      // query linearization
-      for (tpl <- linearizationTemplates.collect{ case dtpl: DocTemplateImpl if dtpl!=this => dtpl}) {
-        val entity = tpl.groupSearch(extractor, default)
-        if (entity != default) return entity
-      }
-      default
     }
 
-    def groupDescription(group: String): Option[Body] = groupSearch(_.groupDesc.get(group), None)
-    def groupPriority(group: String): Int = groupSearch(_.groupPrio.get(group) match { case Some(prio) => prio; case _ => 0 }, 0)
-    def groupName(group: String): String = groupSearch(_.groupNames.get(group) match { case Some(name) => name; case _ => group }, group)
+    def groupDescription(group: String): Option[Body] = groupSearch(_.groupDesc.get(group)) orElse { if (group == defaultGroup) defaultGroupDesc else None }
+    def groupPriority(group: String): Int = groupSearch(_.groupPrio.get(group)) getOrElse { if (group == defaultGroup) defaultGroupPriority else 0 }
+    def groupName(group: String): String = groupSearch(_.groupNames.get(group)) getOrElse { if (group == defaultGroup) defaultGroupName else group }
   }
 
   abstract class PackageImpl(sym: Symbol, inTpl: PackageImpl) extends DocTemplateImpl(sym, inTpl) with Package {
@@ -522,25 +524,29 @@ class ModelFactory(val global: Global, val settings: doc.Settings) {
            extends MemberImpl(sym, inTpl) with NonTemplateMemberEntity {
     override lazy val comment = {
       val inRealTpl =
-        conversion.fold(Option(inTpl)) { conv =>
-          /* Variable precendence order for implicitly added members: Take the variable defifinitions from ...
-           * 1. the target of the implicit conversion
-           * 2. the definition template (owner)
-           * 3. the current template
-           */
-          findTemplateMaybe(conv.toType.typeSymbol) filterNot (_ == makeRootPackage) orElse (
-            findTemplateMaybe(sym.owner) filterNot (_ == makeRootPackage) orElse Option(inTpl)
-          )
-	}
-      inRealTpl flatMap (thisFactory.comment(sym, None, _))
+        /* Variable precendence order for implicitly added members: Take the variable defifinitions from ...
+         * 1. the target of the implicit conversion
+         * 2. the definition template (owner)
+         * 3. the current template
+         */
+        if (conversion.isDefined) findTemplateMaybe(conversion.get.toType.typeSymbol) match {
+          case Some(d) if d != makeRootPackage => d //in case of NoSymbol, it will give us the root package
+          case _ => findTemplateMaybe(sym.owner) match {
+            case Some(d) if d != makeRootPackage => d //in case of NoSymbol, it will give us the root package
+            case _ => inTpl
+          }
+        } else inTpl
+      if (inRealTpl != null) thisFactory.comment(sym, None, inRealTpl) else None
     }
-
-    override def inDefinitionTemplates = useCaseOf.fold(super.inDefinitionTemplates)(_.inDefinitionTemplates)
 
     override def qualifiedName = optimize(inTemplate.qualifiedName + "#" + name)
     lazy val definitionName = {
-      val qualifiedName = conversion.fold(inDefinitionTemplates.head.qualifiedName)(_.conversionQualifiedName)
-      optimize(qualifiedName + "#" + name)
+      // this contrived name is here just to satisfy some older tests -- if you decide to remove it, be my guest, and
+      // also remove property("package object") from test/scaladoc/scalacheck/HtmlFactoryTest.scala so you don't break
+      // the test suite...
+      val packageObject = if (inPackageObject) ".package" else ""
+      if (!conversion.isDefined) optimize(inDefinitionTemplates.head.qualifiedName + packageObject + "#" + name)
+      else                       optimize(conversion.get.conversionQualifiedName + packageObject + "#" + name)
     }
     def isBridge = sym.isBridge
     def isUseCase = useCaseOf.isDefined
@@ -730,7 +736,7 @@ class ModelFactory(val global: Global, val settings: doc.Settings) {
           }
       else {
         // no class inheritance at this point
-        assert(inOriginalOwner(bSym, inTpl) || bSym.isAbstractType || bSym.isAliasType, bSym + " in " + inTpl)
+        assert(inOriginalOwner(bSym, inTpl), bSym + " in " + inTpl)
         Some(createDocTemplate(bSym, inTpl))
       }
     }
@@ -774,6 +780,7 @@ class ModelFactory(val global: Global, val settings: doc.Settings) {
     }
   }
 
+  /** Get the root package */
   def makeRootPackage: PackageImpl = docTemplatesCache(RootPackage).asInstanceOf[PackageImpl]
 
   // TODO: Should be able to override the type
@@ -826,7 +833,7 @@ class ModelFactory(val global: Global, val settings: doc.Settings) {
         Some(new MemberTemplateImpl(bSym, inTpl) with AliasImpl with AliasType {
           override def isAliasType = true
         })
-      else if (!modelFinished && (bSym.isPackage || bSym.isAliasType || bSym.isAbstractType || templateShouldDocument(bSym, inTpl)))
+      else if (!modelFinished && (bSym.isPackage || templateShouldDocument(bSym, inTpl)))
         modelCreation.createTemplate(bSym, inTpl)
       else
         None
@@ -854,7 +861,7 @@ class ModelFactory(val global: Global, val settings: doc.Settings) {
     inTpl.members.find(_.sym == aSym)
   }
 
-  @deprecated("2.10", "Use findLinkTarget instead!")
+  @deprecated("Use `findLinkTarget` instead.", "2.10.0")
   def findTemplate(query: String): Option[DocTemplateImpl] = {
     assert(modelFinished)
     docTemplatesCache.values find { (tpl: DocTemplateImpl) => tpl.qualifiedName == query && !packageDropped(tpl) && !tpl.isObject }
@@ -870,12 +877,20 @@ class ModelFactory(val global: Global, val settings: doc.Settings) {
   def makeTemplate(aSym: Symbol, inTpl: Option[TemplateImpl]): TemplateImpl = {
     assert(modelFinished)
 
-    def makeNoDocTemplate(aSym: Symbol, inTpl: TemplateImpl): NoDocTemplateImpl =
-      noDocTemplatesCache getOrElse (aSym, new NoDocTemplateImpl(aSym, inTpl))
-
-    findTemplateMaybe(aSym) getOrElse {
+    def makeNoDocTemplate(aSym: Symbol, inTpl: TemplateImpl): NoDocTemplateImpl = {
       val bSym = normalizeTemplate(aSym)
-      makeNoDocTemplate(bSym, inTpl getOrElse makeTemplate(bSym.owner))
+      noDocTemplatesCache.get(bSym) match {
+        case Some(noDocTpl) => noDocTpl
+        case None => new NoDocTemplateImpl(bSym, inTpl)
+      }
+    }
+
+    findTemplateMaybe(aSym) match {
+      case Some(dtpl) =>
+        dtpl
+      case None =>
+        val bSym = normalizeTemplate(aSym)
+        makeNoDocTemplate(bSym, if (inTpl.isDefined) inTpl.get else makeTemplate(bSym.owner))
     }
   }
 
@@ -1002,7 +1017,7 @@ class ModelFactory(val global: Global, val settings: doc.Settings) {
   }
 
   def makeQualifiedName(sym: Symbol, relativeTo: Option[Symbol] = None): String = {
-    val stop = relativeTo map (_.ownerChain.toSet) getOrElse Set[Symbol]()
+    val stop = if (relativeTo.isDefined) relativeTo.get.ownerChain.toSet else Set[Symbol]()
     var sym1 = sym
     var path = new StringBuilder()
     // var path = List[Symbol]()
@@ -1025,8 +1040,8 @@ class ModelFactory(val global: Global, val settings: doc.Settings) {
   def inOriginalOwner(aSym: Symbol, inTpl: TemplateImpl): Boolean =
     normalizeTemplate(aSym.owner) == normalizeTemplate(inTpl.sym)
 
-  def templateShouldDocument(aSym: Symbol, inTpl: TemplateImpl): Boolean =
-    (aSym.isTrait || aSym.isClass || aSym.isModule) &&
+  def templateShouldDocument(aSym: Symbol, inTpl: DocTemplateImpl): Boolean =
+    (aSym.isTrait || aSym.isClass || aSym.isModule || typeShouldDocument(aSym, inTpl)) &&
     localShouldDocument(aSym) &&
     !isEmptyJavaObject(aSym) &&
     // either it's inside the original owner or we can document it later:
@@ -1066,15 +1081,31 @@ class ModelFactory(val global: Global, val settings: doc.Settings) {
   // whether or not to create a page for an {abstract,alias} type
   def typeShouldDocument(bSym: Symbol, inTpl: DocTemplateImpl) =
     (settings.docExpandAllTypes.value && (bSym.sourceFile != null)) ||
+    (bSym.isAliasType || bSym.isAbstractType) &&
     { val rawComment = global.expandedDocComment(bSym, inTpl.sym)
       rawComment.contains("@template") || rawComment.contains("@documentable") }
 
-  def findExternalLink(name: String): Option[LinkTo] =
-    settings.extUrlMapping find {
-      case (pkg, _) => name startsWith pkg
-    } map {
-      case (_, url) => LinkToExternal(name, url + "#" + name)
+  def findExternalLink(sym: Symbol, name: String): Option[LinkTo] = {
+    val sym1 =
+      if (sym == AnyClass || sym == AnyRefClass || sym == AnyValClass || sym == NothingClass) ListClass
+      else if (sym.isPackage) 
+        /* Get package object which has associatedFile ne null */
+        sym.info.member(newTermName("package"))
+      else sym
+    Option(sym1.associatedFile) flatMap (_.underlyingSource) flatMap { src =>
+      val path = src.path
+      settings.extUrlMapping get path map { url =>
+        LinkToExternal(name, url + "#" + name)
+      }
+    } orElse {
+      // Deprecated option.
+      settings.extUrlPackageMapping find {
+        case (pkg, _) => name startsWith pkg
+      } map {
+        case (_, url) => LinkToExternal(name, url + "#" + name)
+      }
     }
+  }
 
   def externalSignature(sym: Symbol) = {
     sym.info // force it, otherwise we see lazy types

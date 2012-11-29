@@ -1,5 +1,5 @@
 /* NSC -- new Scala compiler
- * Copyright 2005-2012 LAMP/EPFL
+ * Copyright 2005-2013 LAMP/EPFL
  * @author  Martin Odersky
  */
 
@@ -33,7 +33,7 @@ abstract class GenASM extends SubComponent with BytecodeWriters {
   override def newPhase(p: Phase): Phase = new AsmPhase(p)
 
   private def outputDirectory(sym: Symbol): AbstractFile =
-    settings.outputDirs outputDirFor enteringFlatten(sym.sourceFile)
+    settings.outputDirs outputDirFor beforeFlatten(sym.sourceFile)
 
   private def getFile(base: AbstractFile, clsName: String, suffix: String): AbstractFile = {
     var dir = base
@@ -81,7 +81,7 @@ abstract class GenASM extends SubComponent with BytecodeWriters {
       // At this point it's a module with a main-looking method, so either succeed or warn that it isn't.
       hasApproximate && {
         // Before erasure so we can identify generic mains.
-        enteringErasure {
+        beforeErasure {
           val companion     = sym.linkedClassOfClass
           val companionMain = companion.tpe.member(nme.main)
 
@@ -311,7 +311,7 @@ abstract class GenASM extends SubComponent with BytecodeWriters {
   }
 
   def isTopLevelModule(sym: Symbol): Boolean =
-    exitingPickler { sym.isModuleClass && !sym.isImplClass && !sym.isNestedClass }
+    afterPickler { sym.isModuleClass && !sym.isImplClass && !sym.isNestedClass }
 
   def isStaticModule(sym: Symbol): Boolean = {
     sym.isModuleClass && !sym.isImplClass && !sym.isLifted
@@ -558,7 +558,7 @@ abstract class GenASM extends SubComponent with BytecodeWriters {
     def innerClassSymbolFor(s: Symbol): Symbol =
       if (s.isClass) s else if (s.isModule) s.moduleClass else NoSymbol
 
-    /** Return the a name of this symbol that can be used on the Java platform.  It removes spaces from names.
+    /** Return the name of this symbol that can be used on the Java platform.  It removes spaces from names.
      *
      *  Special handling:
      *    scala.Nothing erases to scala.runtime.Nothing$
@@ -579,7 +579,7 @@ abstract class GenASM extends SubComponent with BytecodeWriters {
          * of inner class all until root class.
          */
         def collectInnerClass(s: Symbol): Unit = {
-          // TODO: some enteringFlatten { ... } which accounts for
+          // TODO: some beforeFlatten { ... } which accounts for
           // being nested in parameterized classes (if we're going to selectively flatten.)
           val x = innerClassSymbolFor(s)
           if(x ne NoSymbol) {
@@ -604,18 +604,12 @@ abstract class GenASM extends SubComponent with BytecodeWriters {
         val internalName = cachedJN.toString()
         val trackedSym = jsymbol(sym)
         reverseJavaName.get(internalName) match {
-          case Some(oldsym) if oldsym.exists && trackedSym.exists =>
-            assert(
-              // In contrast, neither NothingClass nor NullClass show up bytecode-level.
-              (oldsym == trackedSym) || (oldsym == RuntimeNothingClass) || (oldsym == RuntimeNullClass),
-              s"""|Different class symbols have the same bytecode-level internal name:
-                  |     name: $internalName
-                  |   oldsym: ${oldsym.fullNameString}
-                  |  tracked: ${trackedSym.fullNameString}
-              """.stripMargin
-            )
-          case _ =>
+          case None         =>
             reverseJavaName.put(internalName, trackedSym)
+          case Some(oldsym) =>
+            assert((oldsym == trackedSym) || (oldsym == RuntimeNothingClass) || (oldsym == RuntimeNullClass) ||
+                    (oldsym.isModuleClass && (oldsym.sourceModule == trackedSym.sourceModule)), // In contrast, neither NothingClass nor NullClass show up bytecode-level.
+                   "how can getCommonSuperclass() do its job if different class symbols get the same bytecode-level internal name: " + internalName)
         }
       }
 
@@ -688,7 +682,7 @@ abstract class GenASM extends SubComponent with BytecodeWriters {
           innerSym.rawname + innerSym.moduleSuffix
 
       // add inner classes which might not have been referenced yet
-      exitingErasure {
+      afterErasure {
         for (sym <- List(csym, csym.linkedClassOfClass); m <- sym.info.decls.map(innerClassSymbolFor) if m.isClass)
           innerClassBuffer += m
       }
@@ -839,15 +833,10 @@ abstract class GenASM extends SubComponent with BytecodeWriters {
      *
      * The contents of that attribute are determined by the `String[] exceptions` argument to ASM's ClassVisitor.visitMethod()
      * This method returns such list of internal names.
-     *
      */
-    def getExceptions(excs: List[AnnotationInfo]): List[String] = {
-      for (AnnotationInfo(tp, List(exc), _) <- excs.distinct if tp.typeSymbol == ThrowsClass)
-      yield {
-        val Literal(const) = exc
-        javaName(const.typeValue.typeSymbol)
-      }
-    }
+    def getExceptions(excs: List[AnnotationInfo]): List[String] =
+      for (ThrownException(exc) <- excs.distinct)
+      yield javaName(exc)
 
     /** Whether an annotation should be emitted as a Java annotation
      *   .initialize: if 'annot' is read from pickle, atp might be un-initialized
@@ -884,7 +873,7 @@ abstract class GenASM extends SubComponent with BytecodeWriters {
 
       if (!needsGenericSignature(sym)) { return null }
 
-      val memberTpe = enteringErasure(owner.thisType.memberInfo(sym))
+      val memberTpe = beforeErasure(owner.thisType.memberInfo(sym))
 
       val jsOpt: Option[String] = erasure.javaSig(sym, memberTpe)
       if (jsOpt.isEmpty) { return null }
@@ -918,7 +907,7 @@ abstract class GenASM extends SubComponent with BytecodeWriters {
       }
 
       if ((settings.check containsName phaseName)) {
-        val normalizedTpe = enteringErasure(erasure.prepareSigMap(memberTpe))
+        val normalizedTpe = beforeErasure(erasure.prepareSigMap(memberTpe))
         val bytecodeTpe = owner.thisType.memberInfo(sym)
         if (!sym.isType && !sym.isConstructor && !(erasure.erasure(sym)(normalizedTpe) =:= bytecodeTpe)) {
           getCurrentCUnit().warning(sym.pos,
@@ -1451,7 +1440,7 @@ abstract class GenASM extends SubComponent with BytecodeWriters {
           if (lmoc != NoSymbol) {
             // it must be a top level class (name contains no $s)
             val isCandidateForForwarders = {
-              exitingPickler { !(lmoc.name.toString contains '$') && lmoc.hasModuleFlag && !lmoc.isImplClass && !lmoc.isNestedClass }
+              afterPickler { !(lmoc.name.toString contains '$') && lmoc.hasModuleFlag && !lmoc.isImplClass && !lmoc.isNestedClass }
             }
             if (isCandidateForForwarders) {
               log("Adding static forwarders from '%s' to implementations in '%s'".format(c.symbol, lmoc))
@@ -2413,7 +2402,6 @@ abstract class GenASM extends SubComponent with BytecodeWriters {
         import asm.Opcodes
         (instr.category: @scala.annotation.switch) match {
 
-
           case icodes.localsCat =>
           def genLocalInstr() = (instr: @unchecked) match {
             case THIS(_) => jmethod.visitVarInsn(Opcodes.ALOAD, 0)
@@ -2507,6 +2495,7 @@ abstract class GenASM extends SubComponent with BytecodeWriters {
 
           case icodes.objsCat =>
           def genObjsInstr() = (instr: @unchecked) match {
+
             case BOX(kind) =>
               val MethodNameAndType(mname, mdesc) = jBoxTo(kind)
               jcode.invokestatic(BoxesRunTime, mname, mdesc)
@@ -2890,7 +2879,7 @@ abstract class GenASM extends SubComponent with BytecodeWriters {
                 (kind: @unchecked) match {
                   case FLOAT  => emit(Opcodes.FCMPG)
                   case DOUBLE => emit(Opcodes.DCMPL) // TODO bug? why not DCMPG? http://docs.oracle.com/javase/specs/jvms/se5.0/html/Instructions2.doc3.html
-                
+
                 }
             }
             genCompare

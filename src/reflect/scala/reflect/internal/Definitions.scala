@@ -1,5 +1,5 @@
 /* NSC -- new Scala compiler
- * Copyright 2005-2012 LAMP/EPFL
+ * Copyright 2005-2013 LAMP/EPFL
  * @author  Martin Odersky
  */
 
@@ -947,6 +947,7 @@ trait Definitions extends api.StandardDefinitions {
     lazy val BeanPropertyAttr           = requiredClass[scala.beans.BeanProperty]
     lazy val BooleanBeanPropertyAttr    = requiredClass[scala.beans.BooleanBeanProperty]
     lazy val CloneableAttr              = requiredClass[scala.annotation.cloneable]
+    lazy val CompileTimeOnlyAttr        = getClassIfDefined("scala.reflect.macros.compileTimeOnly")
     lazy val DeprecatedAttr             = requiredClass[scala.deprecated]
     lazy val DeprecatedNameAttr         = requiredClass[scala.deprecatedName]
     lazy val DeprecatedInheritanceAttr  = requiredClass[scala.deprecatedInheritance]
@@ -957,7 +958,7 @@ trait Definitions extends api.StandardDefinitions {
     lazy val ScalaNoInlineClass         = requiredClass[scala.noinline]
     lazy val SerialVersionUIDAttr       = requiredClass[scala.SerialVersionUID]
     lazy val SpecializedClass           = requiredClass[scala.specialized]
-    lazy val ThrowsClass                = requiredClass[scala.throws]
+    lazy val ThrowsClass                = requiredClass[scala.throws[_]]
     lazy val TransientAttr              = requiredClass[scala.transient]
     lazy val UncheckedClass             = requiredClass[scala.unchecked]
     lazy val UnspecializedClass         = requiredClass[scala.annotation.unspecialized]

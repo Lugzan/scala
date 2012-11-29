@@ -1,5 +1,5 @@
 /* NSC -- new Scala compiler
- * Copyright 2007-2012 LAMP/EPFL
+ * Copyright 2007-2013 LAMP/EPFL
  * @author  Manohar Jonnalagedda
  */
 
@@ -147,7 +147,7 @@ trait CommentFactory { thisFactory: ModelFactory with CommentFactory with Member
       case (group, body) =>
         try {
           body match {
-            case Body(List(Paragraph(Chain(List(Summary(Text(prio))))))) => List(group -> prio.toInt)
+            case Body(List(Paragraph(Chain(List(Summary(Text(prio))))))) => List(group -> prio.trim.toInt)
             case _                                                       => List()
           }
         } catch {

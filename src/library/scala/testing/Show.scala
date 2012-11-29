@@ -1,6 +1,6 @@
 /*                     __                                               *\
 **     ________ ___   / /  ___     Scala API                            **
-**    / __/ __// _ | / /  / _ |    (c) 2003-2011, LAMP/EPFL             **
+**    / __/ __// _ | / /  / _ |    (c) 2003-2013, LAMP/EPFL             **
 **  __\ \/ /__/ __ |/ /__/ __ |    http://scala-lang.org/               **
 ** /____/\___/_/ |_/____/_/ | |                                         **
 **                          |/                                          **
@@ -37,7 +37,7 @@ trait Show {
     }
   }
 
-  @deprecated("use SymApply instead", "2.10")
+  @deprecated("use SymApply instead", "2.10.0")
   def symApply(sym: Symbol): SymApply = new SymApply(sym)
 
   /** Apply method with name of given symbol `f` to given arguments and return

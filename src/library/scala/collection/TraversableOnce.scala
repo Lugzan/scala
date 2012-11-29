@@ -1,6 +1,6 @@
 /*                     __                                               *\
 **     ________ ___   / /  ___     Scala API                            **
-**    / __/ __// _ | / /  / _ |    (c) 2003-2011, LAMP/EPFL             **
+**    / __/ __// _ | / /  / _ |    (c) 2003-2013, LAMP/EPFL             **
 **  __\ \/ /__/ __ |/ /__/ __ |    http://scala-lang.org/               **
 ** /____/\___/_/ |_/____/_/ | |                                         **
 **                          |/                                          **
@@ -366,9 +366,9 @@ trait TraversableOnce[+A] extends Any with GenTraversableOnce[A] {
 
 
 object TraversableOnce {
-  @deprecated("use OnceCanBuildFrom instead")
+  @deprecated("use OnceCanBuildFrom instead", "2.10.0")
   def traversableOnceCanBuildFrom[T] = new OnceCanBuildFrom[T]
-  @deprecated("use MonadOps instead")
+  @deprecated("use MonadOps instead", "2.10.0")
   def wrapTraversableOnce[A](trav: TraversableOnce[A]) = new MonadOps(trav)
 
   implicit def alternateImplicit[A](trav: TraversableOnce[A]) = new ForceImplicitAmbiguity

@@ -1,5 +1,5 @@
 /* NSC -- new Scala compiler
- * Copyright 2005-2012 LAMP/EPFL
+ * Copyright 2005-2013 LAMP/EPFL
  * @author Martin Odersky
  */
 
@@ -231,9 +231,8 @@ abstract class AddInterfaces extends InfoTransform { self: Erasure =>
           extends ChangeOwnerTraverser(oldowner, newowner) {
     override def traverse(tree: Tree) {
       tree match {
-        case Return(expr) =>
-          if (tree.symbol == oldowner) tree.symbol = newowner
-        case _ =>
+        case _: Return => change(tree.symbol)
+        case _         =>
       }
       super.traverse(tree)
     }

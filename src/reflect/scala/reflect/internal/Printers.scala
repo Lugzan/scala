@@ -1,5 +1,5 @@
 /* NSC -- new Scala compiler
- * Copyright 2005-2012 LAMP/EPFL
+ * Copyright 2005-2013 LAMP/EPFL
  * @author  Martin Odersky
  */
 
@@ -534,17 +534,16 @@ trait Printers extends api.Printers { self: SymbolTable =>
 
       depth += 1
       args foreach {
+        case expr: Expr[_] =>
+          print("Expr")
+          if (printTypes) print(expr.staticType)
+          print("(")
+          print(expr.tree)
+          print(")")
         case EmptyTree =>
           print("EmptyTree")
         case emptyValDef: AnyRef if emptyValDef eq self.emptyValDef =>
           print("emptyValDef")
-        case Literal(Constant(value)) =>
-          def print(s: String) = this.print("Literal(Constant(" + s + "))")
-          value match {
-            case s: String => print("\"" + s + "\"")
-            case null => print(null)
-            case _ => print(value.toString)
-          }
         case tree: Tree =>
           val hasSymbol = tree.hasSymbol && tree.symbol != NoSymbol
           val isError = hasSymbol && tree.symbol.name.toString == nme.ERROR.toString
@@ -562,12 +561,21 @@ trait Printers extends api.Printers { self: SymbolTable =>
                   if (isError) print(": error>")
                 } else if (hasSymbol) {
                   tree match {
-                    case _: Ident | _: Select | _: SelectFromTypeTree => print(tree.symbol)
-                    case _ => print(tree.symbol.name)
+                    case refTree: RefTree =>
+                      if (tree.symbol.name != refTree.name) print("[", tree.symbol, " aka ", refTree.name, "]")
+                      else print(tree.symbol)
+                    case _ =>
+                      print(tree.symbol.name)
                   }
                 } else {
                   print(name)
                 }
+              case Constant(s: String) =>
+                print("Constant(\"" + s + "\")")
+              case Constant(null) =>
+                print("Constant(null)")
+              case Constant(value) =>
+                print("Constant(" + value + ")")
               case arg =>
                 print(arg)
             },
@@ -576,19 +584,24 @@ trait Printers extends api.Printers { self: SymbolTable =>
               case _ => // do nothing
             })
         case sym: Symbol =>
-          if (sym.isStatic && (sym.isClass || sym.isModule)) print(sym.fullName)
+          if (sym == NoSymbol) print("NoSymbol")
+          else if (sym.isStatic && (sym.isClass || sym.isModule)) print(sym.fullName)
           else print(sym.name)
           if (printIds) print("#", sym.id)
           if (printKinds) print("#", sym.abbreviatedKindString)
           if (printMirrors) print("%M", footnotes.put[scala.reflect.api.Mirror[_]](mirrorThatLoaded(sym)))
-        case NoType =>
-          print("NoType")
-        case NoPrefix =>
-          print("NoPrefix")
+        case tag: TypeTag[_] =>
+          print("TypeTag(", tag.tpe, ")")
+        case tag: WeakTypeTag[_] =>
+          print("WeakTypeTag(", tag.tpe, ")")
         case tpe: Type =>
           val defer = printTypesInFootnotes && !printingFootnotes
           if (defer) print("[", footnotes.put(tpe), "]")
-          else printProduct(tpe.asInstanceOf[Product])
+          else tpe match {
+            case NoType => print("NoType")
+            case NoPrefix => print("NoPrefix")
+            case _ => printProduct(tpe.asInstanceOf[Product])
+          }
         case mods: Modifiers =>
           print("Modifiers(")
           if (mods.flags != NoFlags || mods.privateWithin != tpnme.EMPTY || mods.annotations.nonEmpty) print(show(mods.flags))
@@ -597,6 +610,9 @@ trait Printers extends api.Printers { self: SymbolTable =>
           print(")")
         case name: Name =>
           print(show(name))
+        case scope: Scope =>
+          print("Scope")
+          printIterable(scope.toList)
         case list: List[_] =>
           print("List")
           printIterable(list)
@@ -644,16 +660,15 @@ trait Printers extends api.Printers { self: SymbolTable =>
   }
 
   def show(name: Name): String = name match {
-    case tpnme.EMPTY => "tpnme.EMPTY"
-    case tpnme.ROOT => "tpnme.ROOT"
-    case tpnme.PACKAGE => "tpnme.PACKAGE"
-    case tpnme.EMPTY_PACKAGE_NAME => "tpnme.EMPTY_PACKAGE_NAME"
     case tpnme.WILDCARD => "tpnme.WILDCARD"
-    case nme.EMPTY => "nme.EMPTY"
-    case nme.ROOT => "nme.ROOT"
-    case nme.PACKAGE => "nme.PACKAGE"
-    case nme.EMPTY_PACKAGE_NAME => "nme.EMPTY_PACKAGE_NAME"
+    case tpnme.EMPTY => "tpnme.EMPTY"
+    case tpnme.ERROR => "tpnme.ERROR"
+    case tpnme.PACKAGE => "tpnme.PACKAGE"
+    case tpnme.WILDCARD_STAR => "tpnme.WILDCARD_STAR"
     case nme.WILDCARD => "nme.WILDCARD"
+    case nme.EMPTY => "nme.EMPTY"
+    case nme.ERROR => "tpnme.ERROR"
+    case nme.PACKAGE => "nme.PACKAGE"
     case nme.CONSTRUCTOR => "nme.CONSTRUCTOR"
     case nme.ROOTPKG => "nme.ROOTPKG"
     case _ =>

@@ -1,5 +1,5 @@
 /* NSC -- new Scala compiler
- * Copyright 2005-2012 LAMP/EPFL
+ * Copyright 2005-2013 LAMP/EPFL
  * @author  Martin Odersky
  */
 
@@ -317,39 +317,15 @@ abstract class Duplicators extends Analyzer {
           super.typed(tree, mode, pt)
 
         case Select(th @ This(_), sel) if (oldClassOwner ne null) && (th.symbol == oldClassOwner) =>
-          // We use the symbol name instead of the tree name because the symbol
-          // may have been name mangled, rendering the tree name obsolete.
-          // ...but you can't just do a Select on a name because if the symbol is
-          // overloaded, you will crash in the backend.
-          val memberByName  = newClassOwner.thisType.member(tree.symbol.name)
-          def nameSelection = Select(This(newClassOwner), tree.symbol.name)
-          val newTree = (
-            if (memberByName.isOverloaded) {
-              // Find the types of the overload alternatives as seen in the new class,
-              // and filter the list down to those which match the old type (after
-              // fixing the old type so it is seen as if from the new class.)
-              val typeInNewClass = fixType(oldClassOwner.info memberType tree.symbol)
-              val alts           = memberByName.alternatives
-              val memberTypes    = alts map (newClassOwner.info memberType _)
-              val memberString   = memberByName.defString
-              alts zip memberTypes filter (_._2 =:= typeInNewClass) match {
-                case ((alt, tpe)) :: Nil =>
-                  log(s"Arrested overloaded type in Duplicators, narrowing to ${alt.defStringSeenAs(tpe)}\n  Overload was: $memberString")
-                  Select(This(newClassOwner), alt)
-                case xs =>
-                  alts filter (alt => (alt.paramss corresponds tree.symbol.paramss)(_.size == _.size)) match {
-                    case alt :: Nil =>
-                      log(s"Resorted to parameter list arity to disambiguate to $alt\n  Overload was: $memberString")
-                      Select(This(newClassOwner), alt)
-                    case _ =>
-                      log(s"Could not disambiguate $memberTypes. Attempting name-based selection, but we may crash later.")
-                      nameSelection
-                  }
-              }
-            }
-            else nameSelection
-          )
-          super.typed(atPos(tree.pos)(newTree), mode, pt)
+          // log("selection on this, no type ascription required")
+          // we use the symbol name instead of the tree name because the symbol may have been
+          // name mangled, rendering the tree name obsolete
+          // log(tree)
+          val t = super.typedPos(tree.pos, mode, pt) {
+            Select(This(newClassOwner), tree.symbol.name)
+          }
+          // log("typed to: " + t + "; tpe = " + t.tpe + "; " + inspectTpe(t.tpe))
+          t
 
         case This(_) if (oldClassOwner ne null) && (tree.symbol == oldClassOwner) =>
 //          val tree1 = Typed(This(newClassOwner), TypeTree(fixType(tree.tpe.widen)))
@@ -357,7 +333,7 @@ abstract class Duplicators extends Analyzer {
           val tree1 = This(newClassOwner)
           // log("tree1: " + tree1)
           debuglog("mapped " + tree + " to " + tree1)
-          super.typed(atPos(tree.pos)(tree1), mode, pt)
+          super.typedPos(tree.pos, mode, pt)(tree1)
 
         case This(_) =>
           debuglog("selection on this, plain: " + tree)
@@ -394,7 +370,7 @@ abstract class Duplicators extends Analyzer {
               cases
           }
 
-          super.typed(atPos(tree.pos)(Match(scrut, cases1)), mode, pt)
+          super.typedPos(tree.pos, mode, pt)(Match(scrut, cases1))
 
         case EmptyTree =>
           // no need to do anything, in particular, don't set the type to null, EmptyTree.tpe_= asserts
