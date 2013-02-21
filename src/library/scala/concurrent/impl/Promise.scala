@@ -1,6 +1,6 @@
 /*                     __                                               *\
 **     ________ ___   / /  ___     Scala API                            **
-**    / __/ __// _ | / /  / _ |    (c) 2003-2011, LAMP/EPFL             **
+**    / __/ __// _ | / /  / _ |    (c) 2003-2013, LAMP/EPFL             **
 **  __\ \/ /__/ __ |/ /__/ __ |    http://scala-lang.org/               **
 ** /____/\___/_/ |_/____/_/ | |                                         **
 **                          |/                                          **
@@ -34,7 +34,7 @@ private class CallbackRunnable[T](val executor: ExecutionContext, val onComplete
     value = v
     // Note that we cannot prepare the ExecutionContext at this point, since we might
     // already be running on a different thread!
-    executor.execute(this)
+    try executor.execute(this) catch { case NonFatal(t) => executor reportFailure t }
   }
 }
 

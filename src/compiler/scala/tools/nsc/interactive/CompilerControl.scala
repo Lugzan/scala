@@ -1,5 +1,5 @@
 /* NSC -- new Scala compiler
- * Copyright 2009-2012 Scala Solutions and LAMP/EPFL
+ * Copyright 2009-2013 Typesafe/Scala Solutions and LAMP/EPFL
  * @author Martin Odersky
  */
 package scala.tools.nsc
@@ -7,12 +7,11 @@ package interactive
 
 import scala.util.control.ControlThrowable
 import scala.tools.nsc.io.AbstractFile
-import scala.tools.nsc.symtab._
-import scala.tools.nsc.ast._
 import scala.tools.nsc.util.FailedInterrupt
 import scala.tools.nsc.util.EmptyAction
 import scala.tools.nsc.util.WorkScheduler
 import scala.reflect.internal.util.{SourceFile, Position}
+import scala.tools.nsc.util.InterruptReq
 
 /** Interface of interactive compiler to a client such as an IDE
  *  The model the presentation compiler consists of the following parts:
@@ -69,11 +68,11 @@ trait CompilerControl { self: Global =>
    *  if it does not yet exist create a new one atomically
    *  Note: We want to get roid of this operation as it messes compiler invariants.
    */
-  @deprecated("use getUnitOf(s) or onUnitOf(s) instead")
+  @deprecated("use getUnitOf(s) or onUnitOf(s) instead", "2.10.0")
   def unitOf(s: SourceFile): RichCompilationUnit = getOrCreateUnitOf(s)
 
   /** The compilation unit corresponding to a position */
-  @deprecated("use getUnitOf(pos.source) or onUnitOf(pos.source) instead")
+  @deprecated("use getUnitOf(pos.source) or onUnitOf(pos.source) instead", "2.10.0")
   def unitOf(pos: Position): RichCompilationUnit = getOrCreateUnitOf(pos.source)
 
   /** Removes the CompilationUnit corresponding to the given SourceFile
@@ -138,7 +137,11 @@ trait CompilerControl { self: Global =>
 
   /** Sets sync var `response` to the fully attributed & typechecked tree contained in `source`.
    *  @pre `source` needs to be loaded.
+   *  @note Deprecated because of race conditions in the typechecker when the background compiler
+   *        is interrupted while typing the same `source`.
+   *  @see  SI-6578
    */
+  @deprecated("Use `askLoadedTyped` instead to avoid race conditions in the typechecker", "2.10.1")
   def askType(source: SourceFile, forceReload: Boolean, response: Response[Tree]) =
     postWorkItem(new AskTypeItem(source, forceReload, response))
 
@@ -155,6 +158,20 @@ trait CompilerControl { self: Global =>
    */
   def askLinkPos(sym: Symbol, source: SourceFile, response: Response[Position]) =
     postWorkItem(new AskLinkPosItem(sym, source, response))
+
+  /** Sets sync var `response` to doc comment information for a given symbol.
+   *
+   *  @param   sym      The symbol whose doc comment should be retrieved (might come from a classfile)
+   *  @param   site     The place where sym is observed.
+   *  @param   source   The source file that's supposed to contain the definition
+   *  @param   response A response that will be set to the following:
+   *                    If `source` contains a definition of a given symbol that has a doc comment,
+   *                    the (expanded, raw, position) triplet for a comment, otherwise ("", "", NoPosition).
+   *  Note: This operation does not automatically load `source`. If `source`
+   *  is unloaded, it stays that way.
+   */
+  def askDocComment(sym: Symbol, site: Symbol, source: SourceFile, response: Response[(String, String, Position)]) =
+    postWorkItem(new AskDocCommentItem(sym, site, source, response))
 
   /** Sets sync var `response` to list of members that are visible
    *  as members of the tree enclosing `pos`, possibly reachable by an implicit.
@@ -221,6 +238,7 @@ trait CompilerControl { self: Global =>
    *                      everything is brought up to date in a regular type checker run.
    *  @param response     The response.
    */
+  @deprecated("SI-6458: Instrumentation logic will be moved out of the compiler.","2.10.0")
   def askInstrumented(source: SourceFile, line: Int, response: Response[(String, Array[Char])]) =
     postWorkItem(new AskInstrumentedItem(source, line, response))
 
@@ -232,21 +250,18 @@ trait CompilerControl { self: Global =>
   /** Tells the compile server to shutdown, and not to restart again */
   def askShutdown() = scheduler raise ShutdownReq
 
-  @deprecated("use parseTree(source) instead") // deleted 2nd parameter, as this has to run on 2.8 also.
+  @deprecated("use parseTree(source) instead", "2.10.0") // deleted 2nd parameter, as this has to run on 2.8 also.
   def askParse(source: SourceFile, response: Response[Tree]) = respond(response) {
     parseTree(source)
   }
 
   /** Returns parse tree for source `source`. No symbols are entered. Syntax errors are reported.
-   *  Can be called asynchronously from presentation compiler.
+   *
+   *  This method is thread-safe and as such can safely run outside of the presentation
+   *  compiler thread.
    */
-  def parseTree(source: SourceFile): Tree = ask { () =>
-    getUnit(source) match {
-      case Some(unit) if unit.status >= JustParsed =>
-        unit.body
-      case _ =>
-        new UnitParser(new CompilationUnit(source)).parse()
-    }
+  def parseTree(source: SourceFile): Tree = {
+    new UnitParser(new CompilationUnit(source)).parse()
   }
 
   /** Asks for a computation to be done quickly on the presentation compiler thread */
@@ -372,6 +387,14 @@ trait CompilerControl { self: Global =>
       response raise new MissingResponse
   }
 
+  case class AskDocCommentItem(val sym: Symbol, val site: Symbol, val source: SourceFile, response: Response[(String, String, Position)]) extends WorkItem {
+    def apply() = self.getDocComment(sym, site, source, response)
+    override def toString = "doc comment "+sym+" in "+source
+
+    def raiseMissing() =
+      response raise new MissingResponse
+  }
+
   case class AskLoadedTypedItem(val source: SourceFile, response: Response[Tree]) extends WorkItem {
     def apply() = self.waitLoadedTyped(source, response, this.onCompilerThread)
     override def toString = "wait loaded & typed "+source
@@ -388,6 +411,7 @@ trait CompilerControl { self: Global =>
       response raise new MissingResponse
   }
 
+  @deprecated("SI-6458: Instrumentation logic will be moved out of the compiler.","2.10.0")
   case class AskInstrumentedItem(val source: SourceFile, line: Int, response: Response[(String, Array[Char])]) extends WorkItem {
     def apply() = self.getInstrumented(source, line, response)
     override def toString = "getInstrumented "+source
@@ -413,6 +437,16 @@ trait CompilerControl { self: Global =>
     override def doQuickly[A](op: () => A): A = {
       throw new FailedInterrupt(new Exception("Posted a work item to a compiler that's shutting down"))
     }
+
+    override def askDoQuickly[A](op: () => A): InterruptReq { type R = A } = {
+      val ir = new InterruptReq {
+        type R = A
+        val todo = () => throw new MissingResponse
+      }
+      ir.execute()
+      ir
+    }
+
   }
 
 }

@@ -1,5 +1,5 @@
 /* NSC -- new Scala compiler
- * Copyright 2009-2012 Scala Solutions and LAMP/EPFL
+ * Copyright 2009-2013 Typesafe/Scala Solutions and LAMP/EPFL
  * @author Martin Odersky
  */
 package scala.tools.nsc
@@ -96,23 +96,6 @@ trait AskTypeAt extends AskCommand {
     }
   }
 }
-
-
-trait AskType extends AskCommand {
-  import compiler.Tree
-
-  protected def askType(source: SourceFile, forceReload: Boolean)(implicit reporter: Reporter): Response[Tree] = {
-    ask {
-      compiler.askType(source, forceReload, _)
-    }
-  }
-
-  protected def askType(sources: Seq[SourceFile], forceReload: Boolean)(implicit reporter: Reporter): Seq[Response[Tree]] = {
-    for(source <- sources) yield
-      askType(source, forceReload)
-  }
-}
-
 
 trait AskLoadedTyped extends AskCommand {
   import compiler.Tree

@@ -1,6 +1,6 @@
 /*                     __                                               *\
 **     ________ ___   / /  ___     Scala API                            **
-**    / __/ __// _ | / /  / _ |    (c) 2003-2011, LAMP/EPFL             **
+**    / __/ __// _ | / /  / _ |    (c) 2003-2013, LAMP/EPFL             **
 **  __\ \/ /__/ __ |/ /__/ __ |    http://scala-lang.org/               **
 ** /____/\___/_/ |_/____/_/ | |                                         **
 **                          |/                                          **
@@ -12,6 +12,7 @@ package immutable
 
 import scala.collection.generic.{ CanBuildFrom, BitOperations }
 import scala.collection.mutable.{ Builder, MapBuilder }
+import scala.annotation.tailrec
 
 /** Utility class for long maps.
  *  @author David MacIver
@@ -76,8 +77,6 @@ object LongMap {
     }
   }
 }
-
-import LongMap._
 
 // Iterator over a non-empty LongMap.
 private[immutable] abstract class LongMapIterator[V, T](it: LongMap[V]) extends AbstractIterator[T] {
@@ -418,5 +417,20 @@ extends AbstractMap[Long, T]
 
   def ++[S >: T](that: LongMap[S]) =
     this.unionWith[S](that, (key, x, y) => y)
+
+  @tailrec
+  final def firstKey: Long = this match {
+    case LongMap.Bin(_, _, l, r) => l.firstKey
+    case LongMap.Tip(k, v) => k
+    case LongMap.Nil => sys.error("Empty set")
+  }
+
+  @tailrec
+  final def lastKey: Long = this match {
+    case LongMap.Bin(_, _, l, r) => r.lastKey
+    case LongMap.Tip(k , v) => k
+    case LongMap.Nil => sys.error("Empty set")
+  }
+
 }
 

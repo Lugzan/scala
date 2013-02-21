@@ -1,5 +1,5 @@
 /* NSC -- new scala compiler
- * Copyright 2005-2012 LAMP/EPFL
+ * Copyright 2005-2013 LAMP/EPFL
  * @author  Martin Odersky
  */
 
@@ -7,7 +7,6 @@ package scala.reflect
 package internal
 
 import scala.collection.{ mutable, immutable }
-import util._
 
 /** The name of this trait defines the eventual intent better than
  *  it does the initial contents.
@@ -31,20 +30,5 @@ trait ExistentialsAndSkolems {
       }
     }
     (new Deskolemizer).typeSkolems
-  }
-
-  /** Convert to corresponding type parameters all skolems of method
-   *  parameters which appear in `tparams`.
-   */
-  def deskolemizeTypeParams(tparams: List[Symbol])(tp: Type): Type = {
-    class DeSkolemizeMap extends TypeMap {
-      def apply(tp: Type): Type = tp match {
-        case TypeRef(pre, sym, args) if sym.isTypeSkolem && (tparams contains sym.deSkolemize) =>
-          mapOver(typeRef(NoPrefix, sym.deSkolemize, args))
-        case _ =>
-          mapOver(tp)
-      }
-    }
-    new DeSkolemizeMap mapOver tp
   }
 }

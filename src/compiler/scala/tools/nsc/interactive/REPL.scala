@@ -1,19 +1,15 @@
 /* NSC -- new Scala compiler
- * Copyright 2009-2012 Scala Solutions and LAMP/EPFL
+ * Copyright 2009-2013 Typesafe/Scala Solutions and LAMP/EPFL
  * @author Martin Odersky
  */
 package scala.tools.nsc
 package interactive
 
-import scala.concurrent.SyncVar
 import scala.reflect.internal.util._
-import scala.tools.nsc.symtab._
-import scala.tools.nsc.ast._
 import scala.tools.nsc.reporters._
 import scala.tools.nsc.io._
 import scala.tools.nsc.scratchpad.SourceInserter
-import scala.tools.nsc.interpreter.AbstractFileClassLoader
-import java.io.{File, FileWriter}
+import java.io.FileWriter
 
 /** Interface of interactive compiler to a client such as an IDE
  */
@@ -63,7 +59,7 @@ object REPL {
 
   def main(args: Array[String]) {
     process(args)
-    /*sys.*/exit(if (reporter.hasErrors) 1 else 0)// Don't use sys yet as this has to run on 2.8.2 also.
+    sys.exit(if (reporter.hasErrors) 1 else 0)
   }
 
   def loop(action: (String) => Unit) {
@@ -92,6 +88,7 @@ object REPL {
     val completeResult = new Response[List[comp.Member]]
     val typedResult = new Response[comp.Tree]
     val structureResult = new Response[comp.Tree]
+    @deprecated("SI-6458: Instrumentation logic will be moved out of the compiler.","2.10.0")
     val instrumentedResult = new Response[(String, Array[Char])]
 
     def makePos(file: String, off1: String, off2: String) = {
@@ -109,11 +106,6 @@ object REPL {
       show(completeResult)
     }
 
-    def doTypedTree(file: String) {
-      comp.askType(toSourceFile(file), true, typedResult)
-      show(typedResult)
-    }
-
     def doStructure(file: String) {
       comp.askParsedEntered(toSourceFile(file), false, structureResult)
       show(structureResult)
@@ -124,6 +116,7 @@ object REPL {
      *  @param iContents  An Array[Char] containing the instrumented source
      *  @return The name of the instrumented source file
      */
+    @deprecated("SI-6458: Instrumentation logic will be moved out of the compiler.","2.10.0")
     def writeInstrumented(iFullName: String, suffix: String, iContents: Array[Char]): String = {
       val iSimpleName = iFullName drop ((iFullName lastIndexOf '.') + 1)
       val iSourceName = iSimpleName + suffix
@@ -142,6 +135,7 @@ object REPL {
      *                    and outputs in the right column, or None if the presentation compiler
      *                    does not respond to askInstrumented.
      */
+    @deprecated("SI-6458: Instrumentation logic will be moved out of the compiler.","2.10.0")
     def instrument(arguments: List[String], line: Int): Option[(String, String)] = {
       val source = toSourceFile(arguments.head)
       // strip right hand side comment column and any trailing spaces from all lines
@@ -172,10 +166,8 @@ object REPL {
           comp.askReload(List(toSourceFile(file)), reloadResult)
           Thread.sleep(millis.toInt)
           println("ask type now")
-          comp.askType(toSourceFile(file), false, typedResult)
+          comp.askLoadedTyped(toSourceFile(file), typedResult)
           typedResult.get
-        case List("typed", file) =>
-          doTypedTree(file)
         case List("typeat", file, off1, off2) =>
           doTypeAt(makePos(file, off1, off2))
         case List("typeat", file, off1) =>
@@ -190,7 +182,7 @@ object REPL {
           println(instrument(arguments, line.toInt))
         case List("quit") =>
           comp.askShutdown()
-          exit(1) // Don't use sys yet as this has to run on 2.8.2 also.
+          sys.exit(1)
         case List("structure", file) =>
           doStructure(file)
         case _ =>

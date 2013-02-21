@@ -14,7 +14,10 @@ var title = $(document).attr('title');
 var lastHash = "";
 
 $(document).ready(function() {
-    $('body').layout({ west__size: '20%' });
+    $('body').layout({ 
+        west__size: '20%',
+        center__maskContents: true 
+    });
     $('#browser').layout({
         center__paneSelector: ".ui-west-center"
         //,center__initClosed:true
@@ -332,11 +335,10 @@ function keyboardScrolldownLeftPane() {
 /* Configures the text filter  */
 function configureTextFilter() {
     scheduler.add("init", function() {
-        $("#filter").append("<div id='textfilter'><span class='pre'/><span class='input'><input id='index-input' type='text' accesskey='/'/></span><span class='post'/></div>");
-        printAlphabet();
+        $("#textfilter").append("<span class='pre'/><span class='input'><input id='index-input' type='text' accesskey='/'/></span><span class='post'/>");
         var input = $("#textfilter input");
         resizeFilterBlock();
-        input.bind("keydown", function(event) {
+        input.bind('keyup', function(event) {
             if (event.keyCode == 27) { // escape
                 input.attr("value", "");
             }
@@ -529,19 +531,3 @@ function kindFilterSync() {
 function resizeFilterBlock() {
     $("#tpl").css("top", $("#filter").outerHeight(true));
 }
-
-function printAlphabet() {
-    var html = '<a target="template" href="index/index-_.html">#</a>';
-    var c;
-    for (c = 'a'; c <= 'z'; c = String.fromCharCode(c.charCodeAt(0) + 1)) {
-        html += [
-            '<a target="template" href="index/index-',
-            c,
-            '.html">',
-            c.toUpperCase(),
-            '</a>'
-        ].join('');
-    }
-    $("#filter").append('<div id="letters">' + html + '</div>');
-}
-

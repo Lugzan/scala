@@ -1,11 +1,12 @@
 package scala.reflect.reify
 package codegen
 
+import scala.reflect.internal.Flags._
+
 trait GenSymbols {
   self: Reifier =>
 
   import global._
-  import definitions._
 
   /** Symbol table of the reifee.
    *
@@ -99,7 +100,34 @@ trait GenSymbols {
   def reifyFreeTerm(binding: Tree): Tree =
     reifyIntoSymtab(binding.symbol) { sym =>
       if (reifyDebug) println("Free term" + (if (sym.isCapturedVariable) " (captured)" else "") + ": " + sym + "(" + sym.accurateKindString + ")")
-      val name = newTermName(nme.REIFY_FREE_PREFIX + sym.name + (if (sym.isType) nme.REIFY_FREE_THIS_SUFFIX else ""))
+      val name = newTermName("" + nme.REIFY_FREE_PREFIX + sym.name + (if (sym.isType) nme.REIFY_FREE_THIS_SUFFIX else ""))
+      // We need to note whether the free value being reified is stable or not to guide subsequent reflective compilation.
+      // Here's why reflection compilation needs our help.
+      //
+      // When dealing with a tree, which contain free values, toolboxes extract those and wrap the entire tree in a Function
+      // having parameters defined for every free values in the tree. For example, evaluating
+      //
+      //   Ident(setTypeSignature(newFreeTerm("x", 2), <Int>))
+      //
+      // Will generate something like
+      //
+      //   object wrapper {
+      //     def wrapper(x: () => Int) = {
+      //       x()
+      //     }
+      //   }
+      //
+      // Note that free values get transformed into, effectively, by-name parameters. This is done to make sure
+      // that evaluation order is kept intact. And indeed, we cannot just evaluate all free values at once in order
+      // to obtain arguments for wrapper.wrapper, because if some of the free values end up being unused during evaluation,
+      // we might end up doing unnecessary calculations.
+      //
+      // So far, so good - we didn't need any flags at all. However, if the code being reified contains path-dependent types,
+      // we're in trouble, because valid code like `free.T` ends up being transformed into `free.apply().T`, which won't compile.
+      //
+      // To overcome this glitch, we note whether a given free term is stable or not (because vars can also end up being free terms).
+      // Then, if a free term is stable, we tell the compiler to treat `free.apply()` specially and assume that it's stable.
+      if (!sym.isMutable) sym setFlag STABLE
       if (sym.isCapturedVariable) {
         assert(binding.isInstanceOf[Ident], showRaw(binding))
         val capturedBinding = referenceCapturedVariable(sym)
@@ -113,14 +141,14 @@ trait GenSymbols {
     reifyIntoSymtab(binding.symbol) { sym =>
       if (reifyDebug) println("Free type: %s (%s)".format(sym, sym.accurateKindString))
       state.reificationIsConcrete = false
-      val name = newTermName(nme.REIFY_FREE_PREFIX + sym.name)
+      val name: TermName = nme.REIFY_FREE_PREFIX append sym.name
       Reification(name, binding, mirrorBuildCall(nme.newFreeType, reify(sym.name.toString), mirrorBuildCall(nme.flagsFromBits, reify(sym.flags)), reify(origin(sym))))
     }
 
   def reifySymDef(sym: Symbol): Tree =
     reifyIntoSymtab(sym) { sym =>
       if (reifyDebug) println("Sym def: %s (%s)".format(sym, sym.accurateKindString))
-      val name = newTermName(nme.REIFY_SYMDEF_PREFIX + sym.name)
+      val name: TermName = nme.REIFY_SYMDEF_PREFIX append sym.name
       def reifiedOwner = if (sym.owner.isLocatable) reify(sym.owner) else reifySymDef(sym.owner)
       Reification(name, Ident(sym), mirrorBuildCall(nme.newNestedSymbol, reifiedOwner, reify(sym.name), reify(sym.pos), mirrorBuildCall(nme.flagsFromBits, reify(sym.flags)), reify(sym.isClass)))
     }
@@ -144,7 +172,7 @@ trait GenSymbols {
       val reification = reificode(sym)
       import reification.{name, binding}
       val tree = reification.tree updateAttachment ReifyBindingAttachment(binding)
-      state.symtab += (sym, name, tree)
+      state.symtab += (sym, name.toTermName, tree)
     }
     fromSymtab
   }

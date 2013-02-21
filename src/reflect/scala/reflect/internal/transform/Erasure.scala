@@ -16,7 +16,7 @@ trait Erasure {
     /** Is `tp` an unbounded generic type (i.e. which could be instantiated
      *  with primitive as well as class types)?.
      */
-    private def genericCore(tp: Type): Type = tp.normalize match {
+    private def genericCore(tp: Type): Type = tp.dealiasWiden match {
       /* A Java Array<T> is erased to Array[Object] (T can only be a reference type), where as a Scala Array[T] is
        * erased to Object. However, there is only symbol for the Array class. So to make the distinction between
        * a Java and a Scala array, we check if the owner of T comes from a Java class.
@@ -36,7 +36,7 @@ trait Erasure {
      *  then Some((N, T)) where N is the number of Array constructors enclosing `T`,
      *  otherwise None. Existentials on any level are ignored.
      */
-    def unapply(tp: Type): Option[(Int, Type)] = tp.normalize match {
+    def unapply(tp: Type): Option[(Int, Type)] = tp.dealiasWiden match {
       case TypeRef(_, ArrayClass, List(arg)) =>
         genericCore(arg) match {
           case NoType =>
@@ -69,7 +69,7 @@ trait Erasure {
   //
   // This requires that cls.isClass.
   protected def rebindInnerClass(pre: Type, cls: Symbol): Type = {
-    if (cls.owner.isClass) cls.owner.tpe else pre // why not cls.isNestedClass?
+    if (cls.owner.isClass) cls.owner.tpe_* else pre // why not cls.isNestedClass?
   }
 
   def unboxDerivedValueClassMethod(clazz: Symbol): Symbol =
@@ -101,7 +101,7 @@ trait Erasure {
   def valueClassIsParametric(clazz: Symbol): Boolean = {
     assert(!phase.erasedTypes)
     clazz.typeParams contains
-      clazz.derivedValueClassUnbox.tpe.resultType.normalize.typeSymbol
+      clazz.derivedValueClassUnbox.tpe.resultType.typeSymbol
   }
 
   abstract class ErasureMap extends TypeMap {
@@ -221,7 +221,8 @@ trait Erasure {
       case TypeRef(pre, `clazz`, args) =>
         typeRef(pre, clazz, List())
       case tp =>
-        assert(clazz == ArrayClass || tp.isError, s"unexpected constructor erasure $tp for $clazz")
+        if (!(clazz == ArrayClass || tp.isError))
+          assert(clazz == ArrayClass || tp.isError, s"!!! unexpected constructor erasure $tp for $clazz")
         specialScalaErasure(tp)
     }
   }
