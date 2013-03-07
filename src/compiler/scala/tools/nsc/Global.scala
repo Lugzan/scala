@@ -287,7 +287,8 @@ class Global(var currentSettings: Settings, var reporter: Reporter)
   }
 
   @inline final override def debuglog(msg: => String) {
-      println(msg)
+    if (settings.debug.value)
+      log(msg)
   }
 
   @deprecated("Renamed to reportThrowable", "2.10.1")
@@ -1700,8 +1701,32 @@ class Global(var currentSettings: Settings, var reporter: Reporter)
   def forScaladoc      = false
   def createJavadoc    = false
 
+  /** Synthetic macro code */
+  val macroDebugSyntheticCodeStorage = perRunCaches.newMap[String, ListBuffer[(Tree, Position)] ]()
+
   @deprecated("Use forInteractive or forScaladoc, depending on what you're after", "2.9.0")
   def onlyPresentation = false
+
+  def assemblyMacroError(pos: Position, msg: String): String = {
+
+    val sourceName = pos match {
+      case NoPosition => "[No source file]"
+      case p => p.source.toString
+    }
+    val macroNameSuffix = "_macro_debug$.expanded"
+    val (fileName, isTyper) = if (sourceName endsWith macroNameSuffix)
+      ((sourceName stripSuffix macroNameSuffix) + ".scala", false) else (sourceName, true)
+
+    macroDebugSyntheticCodeStorage get fileName match {
+      case Some(lst) => lst foreach {
+          case (tree, treePos) => if (treePos.includes(pos)&&isTyper || !isTyper&&tree.pos.includes(pos)) {
+          return msg + "\nIn expanded macro:\n" + tree.toString + "\nIn expression: \n"
+        }
+      }
+      msg
+      case _ => msg
+    }
+  }
 }
 
 object Global {

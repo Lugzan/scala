@@ -12,12 +12,12 @@ import scala.reflect.internal.util.Statistics
 import scala.reflect.macros.util._
 import java.lang.{Class => jClass, StringBuffer}
 import java.lang.reflect.{Array => jArray, Method => jMethod}
-import scala.reflect.internal.util.Collections._
 import scala.util.control.ControlThrowable
 import scala.reflect.macros.runtime.AbortMacroException
 import scala.tools.nsc.util.BatchSourceFile
 import java.io.{IOException, FileWriter}
 import scala.reflect.io.{VirtualFile, PlainFile}
+import scala.collection.immutable.HashMap
 
 /**
  *  Code to deal with macros, namely with:
@@ -740,6 +740,49 @@ trait Macros extends scala.tools.reflect.FastTrack with Traces {
             if (allowExpanded(expanded)) {
               // also see http://groups.google.com/group/scala-internals/browse_thread/thread/492560d941b315cc
               val expanded1 = try onSuccess(duplicateAndKeepPositions(expanded)) finally popMacroContext()
+
+              def findEnd(tree: global.Tree, parent: global.Tree): Int = {
+                val mustStop = parent.children.lastOption map (_ == tree) getOrElse true
+                if (mustStop) return -1
+
+                var siblings = parent.children
+                while (!siblings.isEmpty) {
+                  val h = siblings.head
+                  siblings = siblings.tail
+
+                  if (h == tree) return siblings.head.pos.startOrPoint
+                }
+
+                return -1
+              }
+
+              val debugPos = expandee.pos match {
+                case range: RangePosition => range
+                case off: OffsetPosition =>
+                  var currentContext = typer.context
+                  var parent = currentContext.tree
+                  var children = expanded
+                  var endPos = -1
+
+                  while (endPos == -1 && currentContext != null && parent != null) {
+                    endPos = findEnd(children, parent)
+                    children = parent
+                    currentContext = currentContext.outer
+                    parent = if (currentContext != null) currentContext.tree else null
+                  }
+                  if (endPos < off.point) endPos = off.point
+                  new RangePosition(off.source, off.point, off.point, endPos)
+                case a => new RangePosition(a.source, a.startOrPoint, a.startOrPoint, a.startOrPoint)
+              }
+
+              val syntheticCodeBlock = (expanded, debugPos)
+              val sourceName = currentUnit.source.toString
+
+              macroDebugSyntheticCodeStorage get sourceName match {
+                case Some(lst) => lst append syntheticCodeBlock
+                case None => macroDebugSyntheticCodeStorage += (currentUnit.source.toString() -> ListBuffer(syntheticCodeBlock))
+              }
+
               if (!hasMacroExpansionAttachment(expanded1)) linkExpandeeAndExpanded(expandee, expanded1)
               if (allowResult(expanded1)) expanded1 else onFailure(expanded)
             } else {
@@ -867,15 +910,8 @@ trait Macros extends scala.tools.reflect.FastTrack with Traces {
             Success(atPos(enclosingMacroPosition.focus)(expanded))
           }
           expanded match {
-            case expanded: Expr[_] =>
-              macroLogVerbose("original:")
-              macroLogLite("" + expanded.tree + "\n" + showRaw(expanded.tree))
-              val freeSyms = expanded.tree.freeTerms ++ expanded.tree.freeTypes
-              freeSyms foreach (sym => MacroFreeSymbolError(expandee, sym))
-              Success(atPos(enclosingMacroPosition)(expanded.tree updateAttachment MacroExpansionAttachment(expandee)))
-            case _ =>
-              MacroExpansionIsNotExprError(expandee, expanded)
-            case expanded: Expr[_] if expandee.symbol.isTermMacro => validateResultingTree(expanded.tree)
+            case expanded: Expr[_] => validateResultingTree(expanded.tree)
+            case expanded: Tree => validateResultingTree(expanded)
             case _ => MacroExpansionHasInvalidTypeError(expandee, expanded)
           }
         } catch {
@@ -1026,8 +1062,25 @@ object MacrosStats {
       println(">>> Tree with positions after type checking: \n" + buffer.toString)
     }
 
+    private def findAllExpanded(root: global.Tree) = {//todo merge it all
+      val found = scala.collection.mutable.HashMap[Int, global.Tree]()
+
+      def traverse(currentTree: global.Tree) {
+        currentTree.attachments.get[global.analyzer.MacroExpansionAttachment] match {
+          case Some(_) => found += (currentTree.pos.startOrPoint -> currentTree)
+          case _ =>
+        }
+
+        currentTree.children foreach (traverse(_))
+      }
+
+      traverse(root)
+      found
+    }
+
     /**
-     * do nothing without -Yrangepos
+     * does nothing without -Yrangepos
+     * if the idea with parser doesn't work, modify this method
      */
     private def adjustTreePositions(newSourceFile: SourceFile, tree: global.Tree) {
       tree.pos match {
@@ -1054,10 +1107,6 @@ object MacrosStats {
       }
 
       def adjustMacroPos(tr: global.Tree, startShift: Int): Int = {
-/*        println(s"Tree: ${tr.toString}${tr.pos}")
-        tr.children foreach {
-          c => println(c + " " + c.pos)
-        }*/
         var oldLength = 0
 
         tr pos_= (tr.pos match {
@@ -1082,7 +1131,7 @@ object MacrosStats {
           case _ =>
         }
 
-        child.attachments.get[global.MacroExpansionAttachment] match {
+        child.attachments.get[global.analyzer.MacroExpansionAttachment] match {
           case _ if child.children.isEmpty =>
             child pos_= shiftPosition(child.pos, shiftOffset)
             shiftOffset
@@ -1101,10 +1150,138 @@ object MacrosStats {
       adjustInner(tree, List[global.Tree](), 0)
     }
 
+    private def adjustTreePositionsEx(newSourceFile: SourceFile, tree: global.Tree,
+                                      generatedBlocks: ListBuffer[(global.Tree, Position)] ) {
+      val prefix = "class $ololo$ {"
+      val suffix = "}"
+      val prefixLength = prefix.length
+
+      val positions = HashMap(generatedBlocks map { case (tr, pos) => (tr.pos, pos) }: _*)
+
+
+      def assertValidPosition(toCheck: global.Tree) {
+        val pos = toCheck.pos
+
+        pos match {
+          case NoPosition =>
+          case _ =>
+            assert(pos.endOrPoint <= newSourceFile.length, s"Invalid tree position: $toCheck  \n  ${pos}")
+        }
+      }
+
+      def shiftPosition(p: Position, shiftOff: Int, shiftEnd: Int = -1) = p match {
+        case range: RangePosition =>
+          new RangePosition(newSourceFile, range.start + shiftOff, Math.max(range.point + shiftOff, newSourceFile.length),
+            Math.max(range.end + (if (shiftEnd == -1) shiftOff else shiftEnd), newSourceFile.length))
+        case offset: OffsetPosition => new OffsetPosition(newSourceFile, Math.max(offset.point + shiftOff, newSourceFile.length))
+        case a => a
+      }
+
+/*      def smartShift(constrPos: Position, originalPos: Position) = {
+        (constrPos, originalPos) match {
+          case (constrRange: RangePosition, originalRange: RangePosition) => new RangePosition(newSourceFile,
+            constrRange.start + originalRange.start, constrRange.point + originalRange.start,
+            constrRange.end + originalRange.start)
+          case (constrRange: RangePosition, originalOffset: OffsetPosition) =>
+            val originalStart = originalOffset.point - (constrRange.point - constrRange.start)
+
+            new RangePosition(newSourceFile, constrRange.start + originalStart - prefixLength,
+              constrRange.point + originalStart, constrRange.end + originalStart)
+          case _ => NoPosition
+        }
+      }*/
+
+      def constructTree(treeText: String) = {
+        val constructed = new global.syntaxAnalyzer.UnitParser(global.newCompilationUnit(prefix + treeText + suffix)).smartParse()
+        //constructed.children.tail().head().children().head().children()
+        constructed.children match {
+          case _ :: tl => tl.headOption flatMap { hd =>
+            hd.children match {
+              case templateDef :: _ if !templateDef.children.isEmpty => Some(templateDef.children.last)
+              case _ => None
+            }
+          }
+          case _ => None
+        }
+      }
+
+
+      def traverseTree(currentTree: global.Tree, currentShift: Int): Int = {
+        def getStartOffset(p: Position) = p match {
+          case (_: RangePosition | _: OffsetPosition) => p.startOrPoint
+          case _ => 0
+        }
+
+        def mergeTrees(originalRoot: global.Tree, constructedRoot: global.Tree) {
+          val offset = originalRoot.pos match {
+            case range: RangePosition => range.start
+            case offset: OffsetPosition => offset.point - (constructedRoot.pos.point - constructedRoot.pos.start)
+            case _ => 0
+          }
+
+          def subMerge(original: global.Tree, constructed: global.Tree) {
+            original pos_= shiftPosition(constructed.pos, offset + currentShift - prefixLength)
+//            assertValidPosition(original)
+
+            if (original.children.size == 0 || constructed.children.size == 0) return
+
+            val filteredChildren = constructed.children filter {
+              case defTree: global.DefDef =>
+                defTree.name.toString != "<init>" //todo: can we compare it better?
+              case _ => true
+            }
+
+            //todo consider other cases
+            if (original.children.size != filteredChildren.size) {
+              assert(false, s"!!!!!Different children ${original} \n ${constructed}")
+            }
+
+            original.children zip filteredChildren foreach {
+              case (o, c) => subMerge(o, c)
+            }
+          }
+
+
+          subMerge(originalRoot, constructedRoot)
+        }
+
+        currentTree.attachments.get[global.analyzer.MacroExpansionAttachment] match {
+          case Some(_) =>
+            val expandeeLength = positions get currentTree.pos match {
+              case Some(p) => p match {
+                case rp: RangePosition => rp.end - rp.start
+                case _ => println("too bad"); 0
+              }
+              case _ => println("too bad (2)"); 0
+            }
+
+            val newTree = constructTree(currentTree.toString.replace("<init>", "$init$")) //for debug, inline later
+            newTree map ( mergeTrees(currentTree, _) )
+            println("ololo")
+
+            currentShift + currentTree.toString.length - expandeeLength
+          case _ =>
+            val newShift = (currentShift /: currentTree.children) { case (sh, tr) => traverseTree(tr, sh) }
+            currentTree pos_= shiftPosition(currentTree.pos, currentShift, newShift)
+            assertValidPosition(currentTree)
+            newShift
+        }
+      }
+
+      traverseTree(tree, 0)
+    }
+
     private def generateSyntheticSourceFile(cunit: global.CompilationUnit,
                                             needOutputToConsole: Boolean): Option[BatchSourceFile] = {
       val cname = cunit.source.toString()
       val macroPrefix = "<[[macro:"  //s
+
+      val typeChecked = findAllExpanded(cunit.body)
+
+      def getTypeCheckedTreeText(expandedTree: global.Tree) = typeChecked get expandedTree.pos.startOrPoint match {
+        case Some(tree) => tree.toString
+        case _ => println("too bad ($)"); expandedTree.toString
+      }
 
       global.macroDebugSyntheticCodeStorage get cname match {
         case Some(lst) =>
@@ -1112,7 +1289,7 @@ object MacrosStats {
           val code = cunit.source.content
 
           val genDelta =
-            (0 /: lst) {case (s, (expanded, pos)) => s + expanded.toString.length - pos.endOrPoint + pos.startOrPoint }
+            (0 /: lst) {case (s, (expanded, pos)) => s + getTypeCheckedTreeText(expanded).length - pos.endOrPoint + pos.startOrPoint }
 
           val finalSourceCodeMaxLength = code.length + genDelta
           val finalSourceCodeChars = new Array[Char](finalSourceCodeMaxLength)
@@ -1121,8 +1298,8 @@ object MacrosStats {
             case ((sourcePos, generatedSourcePos), (expandedMacroSyn, macroPos)) =>
               import scala.collection.convert._
 
-              //todo rename to class name (or rewrite toString)
-              val expandedMacroSynSrc = expandedMacroSyn.toString.replace("<init>", "_init_").replace("scala.this.", "Predef.")
+              //todo rename to class name (or rewrite .toString)
+              val expandedMacroSynSrc = getTypeCheckedTreeText(expandedMacroSyn).replace("<init>", "$init$")
 
               System.arraycopy(code, sourcePos, finalSourceCodeChars, generatedSourcePos,
                 macroPos.startOrPoint - sourcePos)
@@ -1168,14 +1345,20 @@ object MacrosStats {
 
     class MacroDebugCodeGenerationPhase(prev: scala.tools.nsc.Phase) extends StdPhase(prev) {
       def apply(unit: global.CompilationUnit) {
-        generateSyntheticSourceFile(unit, true) match {
-          case Some(file) =>
-            unit.source = file
-            adjustTreePositions(file, unit.body)
-          case None =>
-        }
+        if (global.currentSettings.Ymacrodebug.value){
+          generateSyntheticSourceFile(unit, true) match {
+            case Some(file) =>
+              val refName = unit.source.toString()
+              val list = global.macroDebugSyntheticCodeStorage.get(refName).get
 
-        debugToString(unit.body)
+              unit.source = file
+//              adjustTreePositions(file, unit.body)
+              adjustTreePositionsEx(file, unit.body, list)
+            case _ =>
+          }
+
+          if (global.currentSettings.YmacrodebugVerbose.value) debugToString(unit.body)
+        }
       }
     }
   }

@@ -109,10 +109,10 @@ trait CompilationUnits { self: Global =>
       reporter.echo(pos, msg)
 
     def error(pos: Position, msg: String) =
-      reporter.error(pos, msg)
+      reporter.error(pos, assemblyMacroError(pos, msg))
 
     def warning(pos: Position, msg: String) =
-      reporter.warning(pos, msg)
+      reporter.warning(pos, assemblyMacroError(pos, msg))
 
     def deprecationWarning(pos: Position, msg: String) =
       currentRun.deprecationWarnings0.warn(pos, msg)
