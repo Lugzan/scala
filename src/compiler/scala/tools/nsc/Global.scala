@@ -28,6 +28,10 @@ import backend.jvm.GenASM
 import backend.opt.{ Inliners, InlineExceptionHandlers, ClosureElimination, DeadCodeElimination }
 import backend.icode.analysis._
 import scala.language.postfixOps
+import scala.reflect.internal.StdAttachments
+import scala.reflect.ClassTag
+import scala.collection.mutable.ListBuffer
+import scala.tools.nsc.typechecker.MacrosStats.MacroDebugCodeGenerator
 
 class Global(var currentSettings: Settings, var reporter: Reporter)
     extends SymbolTable
