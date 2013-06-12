@@ -6,6 +6,7 @@
 package scala.tools.nsc
 package typechecker
 
+import scala.collection.{ mutable, immutable }
 import symtab.Flags._
 import scala.collection.mutable.ListBuffer
 
@@ -48,6 +49,10 @@ trait SyntheticMethods extends ast.TreeDSL {
     else if (clazz.isDerivedValueClass) valueSymbols
     else Nil
   }
+  private lazy val renamedCaseAccessors = perRunCaches.newMap[Symbol, mutable.Map[TermName, TermName]]()
+  /** Does not force the info of `caseclazz` */
+  final def caseAccessorName(caseclazz: Symbol, paramName: TermName) =
+    (renamedCaseAccessors get caseclazz).fold(paramName)(_(paramName))
 
   /** Add the synthetic methods to case classes.
    */
@@ -76,14 +81,7 @@ trait SyntheticMethods extends ast.TreeDSL {
       else templ
     }
 
-    val originalAccessors = clazz.caseFieldAccessors
-    // private ones will have been renamed -- make sure they are entered
-    // in the original order.
-    def accessors = clazz.caseFieldAccessors sortBy { acc =>
-      originalAccessors indexWhere { orig =>
-        (acc.name == orig.name) || (acc.name startsWith (orig.name append "$"))
-      }
-    }
+    def accessors = clazz.caseFieldAccessors
     val arity = accessors.size
     // If this is ProductN[T1, T2, ...], accessorLub is the lub of T1, T2, ..., .
     // !!! Hidden behind -Xexperimental due to bummer type inference bugs.
@@ -146,11 +144,23 @@ trait SyntheticMethods extends ast.TreeDSL {
         Ident(m.firstParam) IS_OBJ classExistentialType(clazz))
     }
 
-    /** (that.isInstanceOf[this.C])
-     *  where that is the given methods first parameter.
+    /** that match { case _: this.C => true ; case _ => false }
+     *  where `that` is the given method's first parameter.
+     *
+     *  An isInstanceOf test is insufficient because it has weaker
+     *  requirements than a pattern match. Given an inner class Foo and
+     *  two different instantiations of the container, an x.Foo and and a y.Foo
+     *  are both .isInstanceOf[Foo], but the one does not match as the other.
      */
-    def thatTest(eqmeth: Symbol): Tree =
-      gen.mkIsInstanceOf(Ident(eqmeth.firstParam), classExistentialType(clazz), true, false)
+    def thatTest(eqmeth: Symbol): Tree = {
+      Match(
+        Ident(eqmeth.firstParam),
+        List(
+          CaseDef(Typed(Ident(nme.WILDCARD), TypeTree(clazz.tpe)), EmptyTree, TRUE),
+          CaseDef(WILD.empty, EmptyTree, FALSE)
+        )
+      )
+    }
 
     /** (that.asInstanceOf[this.C])
      *  where that is the given methods first parameter.
@@ -364,6 +374,7 @@ trait SyntheticMethods extends ast.TreeDSL {
       def isRewrite(sym: Symbol) = sym.isCaseAccessorMethod && !sym.isPublic
 
       for (ddef @ DefDef(_, _, _, _, _, _) <- templ.body ; if isRewrite(ddef.symbol)) {
+        val original = ddef.symbol
         val newAcc = deriveMethod(ddef.symbol, name => context.unit.freshTermName(name + "$")) { newAcc =>
           newAcc.makePublic
           newAcc resetFlag (ACCESSOR | PARAMACCESSOR)
@@ -372,6 +383,8 @@ trait SyntheticMethods extends ast.TreeDSL {
         // TODO: shouldn't the next line be: `original resetFlag CASEACCESSOR`?
         ddef.symbol resetFlag CASEACCESSOR
         lb += logResult("case accessor new")(newAcc)
+        val renamedInClassMap = renamedCaseAccessors.getOrElseUpdate(clazz, mutable.Map() withDefault(x => x))
+        renamedInClassMap(original.name.toTermName) = newAcc.symbol.name.toTermName
       }
 
       (lb ++= templ.body ++= synthesize()).toList

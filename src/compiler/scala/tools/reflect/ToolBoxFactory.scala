@@ -1,10 +1,12 @@
 package scala.tools
 package reflect
 
+import scala.tools.nsc.EXPRmode
 import scala.tools.nsc.reporters._
 import scala.tools.nsc.CompilerCommand
 import scala.tools.nsc.io.VirtualDirectory
 import scala.tools.nsc.interpreter.AbstractFileClassLoader
+import scala.reflect.internal.Flags._
 import scala.reflect.internal.util.{BatchSourceFile, NoSourceFile, NoFile}
 import java.lang.{Class => jClass}
 import scala.compat.Platform.EOL
@@ -148,13 +150,13 @@ abstract class ToolBoxFactory[U <: JavaUniverse](val u: U) { factorySelf =>
         unwrapped = new Transformer {
           override def transform(tree: Tree): Tree =
             tree match {
-              case Ident(name) if invertedIndex contains name =>
+              case Ident(name: TermName) if invertedIndex contains name =>
                 Ident(invertedIndex(name)) setType tree.tpe
               case _ =>
                 super.transform(tree)
             }
         }.transform(unwrapped)
-        new TreeTypeSubstituter(dummies1 map (_.symbol), dummies1 map (dummy => SingleType(NoPrefix, invertedIndex(dummy.symbol.name)))).traverse(unwrapped)
+        new TreeTypeSubstituter(dummies1 map (_.symbol), dummies1 map (dummy => SingleType(NoPrefix, invertedIndex(dummy.symbol.name.toTermName)))).traverse(unwrapped)
         unwrapped = if (expr0.isTerm) unwrapped else unwrapFromTerm(unwrapped)
         unwrapped
       }
@@ -163,7 +165,7 @@ abstract class ToolBoxFactory[U <: JavaUniverse](val u: U) { factorySelf =>
         transformDuringTyper(expr, withImplicitViewsDisabled = withImplicitViewsDisabled, withMacrosDisabled = withMacrosDisabled)(
           (currentTyper, expr) => {
             trace("typing (implicit views = %s, macros = %s): ".format(!withImplicitViewsDisabled, !withMacrosDisabled))(showAttributed(expr, true, true, settings.Yshowsymkinds.value))
-            currentTyper.silent(_.typed(expr, analyzer.EXPRmode, pt)) match {
+            currentTyper.silent(_.typed(expr, EXPRmode, pt)) match {
               case analyzer.SilentResultValue(result) =>
                 trace("success: ")(showAttributed(result, true, true, settings.Yshowsymkinds.value))
                 result
@@ -208,8 +210,9 @@ abstract class ToolBoxFactory[U <: JavaUniverse](val u: U) { factorySelf =>
 
           val meth = obj.moduleClass.newMethod(newTermName(wrapperMethodName))
           def makeParam(schema: (FreeTermSymbol, TermName)) = {
+            // see a detailed explanation of the STABLE trick in `GenSymbols.reifyFreeTerm`
             val (fv, name) = schema
-            meth.newValueParameter(name) setInfo appliedType(definitions.FunctionClass(0).tpe, List(fv.tpe.resultType))
+            meth.newValueParameter(name, newFlags = if (fv.hasStableFlag) STABLE else 0) setInfo appliedType(definitions.FunctionClass(0).tpe, List(fv.tpe.resultType))
           }
           meth setInfo MethodType(freeTerms.map(makeParam).toList, AnyClass.tpe)
           minfo.decls enter meth
@@ -227,7 +230,6 @@ abstract class ToolBoxFactory[U <: JavaUniverse](val u: U) { factorySelf =>
                   emptyValDef,
                   NoMods,
                   List(),
-                  List(List()),
                   List(methdef),
                   NoPosition))
           trace("wrapped: ")(showAttributed(moduledef, true, true, settings.Yshowsymkinds.value))
@@ -410,4 +412,3 @@ abstract class ToolBoxFactory[U <: JavaUniverse](val u: U) { factorySelf =>
     def eval(tree: u.Tree): Any = compile(tree)()
   }
 }
-

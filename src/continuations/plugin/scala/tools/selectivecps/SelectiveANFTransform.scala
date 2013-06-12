@@ -17,12 +17,13 @@ abstract class SelectiveANFTransform extends PluginComponent with Transform with
   import definitions._             // standard classes and methods
   import typer.atOwner             // methods to type trees
 
+  override def description = "ANF pre-transform for @cps"
+
   /** the following two members override abstract members in Transform */
   val phaseName: String = "selectiveanf"
 
   protected def newTransformer(unit: CompilationUnit): Transformer =
     new ANFTransformer(unit)
-
 
   class ANFTransformer(unit: CompilationUnit) extends TypingTransformer(unit) {
 
@@ -128,7 +129,7 @@ abstract class SelectiveANFTransform extends PluginComponent with Transform with
 
             def transformPureMatch(tree: Tree, selector: Tree, cases: List[CaseDef]) = {
               val caseVals = cases map { case cd @ CaseDef(pat, guard, body) =>
-                // if (!hasPlusMarker(body.tpe)) body.tpe = body.tpe withAnnotation newPlusMarker() // TODO: to avoid warning
+                // if (!hasPlusMarker(body.tpe)) body modifyType (_ withAnnotation newPlusMarker()) // TODO: to avoid warning
                 val bodyVal = transExpr(body, None, ext) // ??? triggers "cps-transformed unexpectedly" warning in transTailValue
                 treeCopy.CaseDef(cd, transform(pat), transform(guard), bodyVal)
               }

@@ -50,7 +50,9 @@ trait MethodSynthesis {
 
   class ClassMethodSynthesis(val clazz: Symbol, localTyper: Typer) {
     def mkThis = This(clazz) setPos clazz.pos.focus
-    def mkThisSelect(sym: Symbol) = atPos(clazz.pos.focus)(Select(mkThis, sym))
+    def mkThisSelect(sym: Symbol) = atPos(clazz.pos.focus)(
+      if (clazz.isClass) Select(This(clazz), sym) else Ident(sym)
+    )
 
     private def isOverride(name: TermName) =
       clazzMember(name).alternatives exists (sym => !sym.isDeferred && (sym.owner != clazz))
@@ -60,7 +62,7 @@ trait MethodSynthesis {
       overrideFlag | SYNTHETIC
     }
     def newMethodFlags(method: Symbol) = {
-      val overrideFlag = if (isOverride(method.name)) OVERRIDE else 0L
+      val overrideFlag = if (isOverride(method.name.toTermName)) OVERRIDE else 0L
       (method.flags | overrideFlag | SYNTHETIC) & ~DEFERRED
     }
 
@@ -68,11 +70,13 @@ trait MethodSynthesis {
       localTyper typed ValOrDefDef(method, f(method))
 
     private def createInternal(name: Name, f: Symbol => Tree, info: Type): Tree = {
-      val m = clazz.newMethod(name.toTermName, clazz.pos.focus, newMethodFlags(name))
+      val name1 = name.toTermName
+      val m = clazz.newMethod(name1, clazz.pos.focus, newMethodFlags(name1))
       finishMethod(m setInfoAndEnter info, f)
     }
     private def createInternal(name: Name, f: Symbol => Tree, infoFn: Symbol => Type): Tree = {
-      val m = clazz.newMethod(name.toTermName, clazz.pos.focus, newMethodFlags(name))
+      val name1 = name.toTermName
+      val m = clazz.newMethod(name1, clazz.pos.focus, newMethodFlags(name1))
       finishMethod(m setInfoAndEnter infoFn(m), f)
     }
     private def cloneInternal(original: Symbol, f: Symbol => Tree, name: Name): Tree = {
@@ -122,7 +126,7 @@ trait MethodSynthesis {
 
   /** There are two key methods in here.
    *
-   *   1) Enter methods such as enterGetterSetterare called
+   *   1) Enter methods such as enterGetterSetter are called
    *   from Namer with a tree which may generate further trees such as accessors or
    *   implicit wrappers. Some setup is performed.  In general this creates symbols
    *   and enters them into the scope of the owner.
@@ -167,14 +171,46 @@ trait MethodSynthesis {
       enterBeans(tree)
     }
 
+    /** This is called for those ValDefs which addDerivedTrees ignores, but
+     *  which might have a warnable annotation situation.
+     */
+    private def warnForDroppedAnnotations(tree: Tree) {
+      val annotations   = tree.symbol.initialize.annotations
+      val targetClass   = defaultAnnotationTarget(tree)
+      val retained      = deriveAnnotations(annotations, targetClass, keepClean = true)
+
+      annotations filterNot (retained contains _) foreach (ann => issueAnnotationWarning(tree, ann, targetClass))
+    }
+    private def issueAnnotationWarning(tree: Tree, ann: AnnotationInfo, defaultTarget: Symbol) {
+      global.reporter.warning(ann.pos,
+        s"no valid targets for annotation on ${tree.symbol} - it is discarded unused. " +
+        s"You may specify targets with meta-annotations, e.g. @($ann @${defaultTarget.name})")
+    }
+
     def addDerivedTrees(typer: Typer, stat: Tree): List[Tree] = stat match {
       case vd @ ValDef(mods, name, tpt, rhs) if !noFinishGetterSetter(vd) =>
         // If we don't save the annotations, they seem to wander off.
         val annotations = stat.symbol.initialize.annotations
-        ( allValDefDerived(vd)
+        val trees = (
+          allValDefDerived(vd)
                 map (acc => atPos(vd.pos.focus)(acc derive annotations))
           filterNot (_ eq EmptyTree)
         )
+        // Verify each annotation landed safely somewhere, else warn.
+        // Filtering when isParamAccessor is a necessary simplification
+        // because there's a bunch of unwritten annotation code involving
+        // the propagation of annotations - constructor parameter annotations
+        // may need to make their way to parameters of the constructor as
+        // well as fields of the class, etc.
+        if (!mods.isParamAccessor) annotations foreach (ann =>
+          if (!trees.exists(_.symbol hasAnnotation ann.symbol))
+            issueAnnotationWarning(vd, ann, GetterTargetClass)
+        )
+
+        trees
+      case vd: ValDef =>
+        warnForDroppedAnnotations(vd)
+        vd :: Nil
       case cd @ ClassDef(mods, _, _, _) if mods.isImplicit =>
         val annotations = stat.symbol.initialize.annotations
         // TODO: need to shuffle annotations between wrapper and class.
@@ -183,8 +219,8 @@ trait MethodSynthesis {
         context.unit.synthetics get meth match {
           case Some(mdef) =>
             context.unit.synthetics -= meth
-            meth setAnnotations deriveAnnotations(annotations, MethodTargetClass, false)
-            cd.symbol setAnnotations deriveAnnotations(annotations, ClassTargetClass, true)
+            meth setAnnotations deriveAnnotations(annotations, MethodTargetClass, keepClean = false)
+            cd.symbol setAnnotations deriveAnnotations(annotations, ClassTargetClass, keepClean = true)
             List(cd, mdef)
           case _ =>
             // Shouldn't happen, but let's give ourselves a reasonable error when it does
@@ -201,8 +237,7 @@ trait MethodSynthesis {
     )
     def beanAccessors(vd: ValDef): List[DerivedFromValDef] = {
       val setter = if (vd.mods.isMutable) List(BeanSetter(vd)) else Nil
-      if (forMSIL) Nil
-      else if (vd.symbol hasAnnotation BeanPropertyAttr)
+      if (vd.symbol hasAnnotation BeanPropertyAttr)
         BeanGetter(vd) :: setter
       else if (vd.symbol hasAnnotation BooleanBeanPropertyAttr)
         BooleanBeanGetter(vd) :: setter
@@ -276,6 +311,7 @@ trait MethodSynthesis {
        */
       def category: Symbol
 
+      /* Explicit isSetter required for bean setters (beanSetterSym.isSetter is false) */
       final def completer(sym: Symbol) = namerOf(sym).accessorTypeCompleter(tree, isSetter)
       final def fieldSelection         = Select(This(enclClass), basisSym)
       final def derivedMods: Modifiers = mods & flagsMask | flagsExtra mapAnnotations (_ => Nil)
@@ -336,7 +372,7 @@ trait MethodSynthesis {
         result
       }
       def derivedTree: DefDef          =
-        factoryMeth(mods & flagsMask | flagsExtra, name, tree, symbolic = false)
+        factoryMeth(mods & flagsMask | flagsExtra, name, tree)
       def flagsExtra: Long             = METHOD | IMPLICIT | SYNTHETIC
       def flagsMask: Long              = AccessFlags
       def name: TermName               = tree.name.toTermName
@@ -521,9 +557,6 @@ trait MethodSynthesis {
     }
 
     protected def enterBeans(tree: ValDef) {
-      if (forMSIL)
-        return
-
       val ValDef(mods, name, _, _) = tree
       val beans = beanAccessorsFromNames(tree)
       if (beans.nonEmpty) {

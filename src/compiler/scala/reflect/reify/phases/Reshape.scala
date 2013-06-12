@@ -89,8 +89,8 @@ trait Reshape {
     }
 
     private def undoMacroExpansion(tree: Tree): Tree =
-      tree.attachments.get[MacroExpansionAttachment] match {
-        case Some(MacroExpansionAttachment(original)) =>
+      tree.attachments.get[analyzer.MacroExpansionAttachment] match {
+        case Some(analyzer.MacroExpansionAttachment(original, _)) =>
           original match {
             // this hack is necessary until I fix implicit macros
             // so far tag materialization is implemented by sneaky macros hidden in scala-compiler.jar
@@ -187,8 +187,12 @@ trait Reshape {
     }
 
     private def toPreTyperTypedOrAnnotated(tree: Tree): Tree = tree match {
-      case ty @ Typed(expr1, tt @ TypeTree()) =>
+      case ty @ Typed(expr1, tpt) =>
         if (reifyDebug) println("reify typed: " + tree)
+        val original = tpt match {
+          case tt @ TypeTree() => tt.original
+          case tpt => tpt
+        }
         val annotatedArg = {
           def loop(tree: Tree): Tree = tree match {
             case annotated1 @ Annotated(ann, annotated2 @ Annotated(_, _)) => loop(annotated2)
@@ -196,15 +200,15 @@ trait Reshape {
             case _ => EmptyTree
           }
 
-          loop(tt.original)
+          loop(original)
         }
         if (annotatedArg != EmptyTree) {
           if (annotatedArg.isType) {
             if (reifyDebug) println("verdict: was an annotated type, reify as usual")
             ty
           } else {
-            if (reifyDebug) println("verdict: was an annotated value, equivalent is " + tt.original)
-            toPreTyperTypedOrAnnotated(tt.original)
+            if (reifyDebug) println("verdict: was an annotated value, equivalent is " + original)
+            toPreTyperTypedOrAnnotated(original)
           }
         } else {
           if (reifyDebug) println("verdict: wasn't annotated, reify as usual")
@@ -254,7 +258,7 @@ trait Reshape {
       val flags1 = (flags0 & GetterFlags) & ~(STABLE | ACCESSOR | METHOD)
       val mods1 = Modifiers(flags1, privateWithin0, annotations0) setPositions mods0.positions
       val mods2 = toPreTyperModifiers(mods1, ddef.symbol)
-      ValDef(mods2, name1, tpt0, extractRhs(rhs0))
+      ValDef(mods2, name1.toTermName, tpt0, extractRhs(rhs0))
     }
 
     private def trimAccessors(deff: Tree, stats: List[Tree]): List[Tree] = {
@@ -293,7 +297,7 @@ trait Reshape {
           }
           val mods2 = toPreTyperModifiers(mods1, vdef.symbol)
           val name1 = nme.dropLocalSuffix(name)
-          val vdef1 = ValDef(mods2, name1, tpt, rhs)
+          val vdef1 = ValDef(mods2, name1.toTermName, tpt, rhs)
           if (reifyDebug) println("resetting visibility of field: %s => %s".format(vdef, vdef1))
           Some(vdef1) // no copyAttrs here, because new ValDef and old symbols are now out of sync
         case ddef: DefDef if !ddef.mods.isLazy =>

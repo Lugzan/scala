@@ -1,5 +1,6 @@
 import scala.tools.nsc.doc.model._
-import scala.tools.nsc.doc.model.comment._
+import scala.tools.nsc.doc.base._
+import scala.tools.nsc.doc.base.comment._
 import scala.tools.partest.ScaladocModelTest
 import java.net.{URI, URL}
 import java.io.File
@@ -32,10 +33,10 @@ object Test extends ScaladocModelTest {
   def scalaURL = "http://bog.us"
 
   override def scaladocSettings = {
-    val scalaLibUri = getClass.getClassLoader.getResource("scala/Function1.class").toURI.getSchemeSpecificPart.split("!")(0)
-    val scalaLib = new File(new URL(scalaLibUri).getPath).getPath
-    val extArg = new URI("file", scalaLib, scalaURL).toString
-    "-no-link-warnings -doc-external-uris " + extArg
+    val scalaLibUri = getClass.getClassLoader.getResource("scala/Function1.class").getPath.split("!")(0)
+    val scalaLibPath = new URI(scalaLibUri).getPath
+    val externalArg = s"$scalaLibPath#$scalaURL"
+    "-no-link-warnings -doc-external-doc " + externalArg
   }
 
   def testModel(rootPackage: Package) {

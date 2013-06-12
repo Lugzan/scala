@@ -149,7 +149,7 @@ abstract class TailCalls extends Transform {
       def enclosingType    = method.enclClass.typeOfThis
       def isEligible       = method.isEffectivelyFinal
       // @tailrec annotation indicates mandatory transformation
-      def isMandatory      = method.hasAnnotation(TailrecClass) && !forMSIL
+      def isMandatory      = method.hasAnnotation(TailrecClass)
       def isTransformed    = isEligible && accessed(label)
       def tailrecFailure() = unit.error(failPos, "could not optimize @tailrec annotated " + method + ": " + failReason)
 
@@ -229,7 +229,6 @@ abstract class TailCalls extends Transform {
         }
         else if (!matchesTypeArgs)      failHere("it is called recursively with different type arguments")
         else if (receiver == EmptyTree) rewriteTailCall(This(currentClass))
-        else if (forMSIL)               fail("it cannot be optimized on MSIL")
         else if (!receiverIsSame)       failHere("it changes type of 'this' on a polymorphic recursive call")
         else                            rewriteTailCall(receiver)
       }
@@ -326,8 +325,16 @@ abstract class TailCalls extends Transform {
             transformTrees(cases).asInstanceOf[List[CaseDef]]
           )
 
+        case Try(block, catches, finalizer @ EmptyTree) =>
+          // SI-1672 Catches are in tail position when there is no finalizer
+          treeCopy.Try(tree,
+            noTailTransform(block),
+            transformTrees(catches).asInstanceOf[List[CaseDef]],
+            EmptyTree
+          )
+
         case Try(block, catches, finalizer) =>
-           // no calls inside a try are in tail position, but keep recursing for nested functions
+           // no calls inside a try are in tail position if there is a finalizer, but keep recursing for nested functions
           treeCopy.Try(tree,
             noTailTransform(block),
             noTailTransforms(catches).asInstanceOf[List[CaseDef]],

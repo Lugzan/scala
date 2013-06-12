@@ -51,9 +51,9 @@ class ReflectiveRunner {
         new ConsoleFileManager
 
     import fileManager.
-      { latestCompFile, latestReflectFile, latestLibFile, latestPartestFile, latestFjbgFile, latestScalapFile, latestActorsFile }
+      { latestCompFile, latestReflectFile, latestLibFile, latestPartestFile, latestScalapFile, latestActorsFile }
     val files =
-      Array(latestCompFile, latestReflectFile, latestLibFile, latestPartestFile, latestFjbgFile, latestScalapFile, latestActorsFile) map (x => io.File(x))
+      Array(latestCompFile, latestReflectFile, latestLibFile, latestPartestFile, latestScalapFile, latestActorsFile) map (x => io.File(x))
 
     val sepUrls   = files map (_.toURL)
     var sepLoader = new URLClassLoader(sepUrls, null)
@@ -81,6 +81,9 @@ class ReflectiveRunner {
     val newClasspath = ClassPath.join(paths: _*)
 
     setProp("java.class.path", newClasspath)
+
+    // don't let partest find pluginsdir; in ant build, standard plugin has dedicated test suite
+    //setProp("scala.home", latestLibFile.parent.parent.path)
     setProp("scala.home", "")
 
     if (isPartestDebug)

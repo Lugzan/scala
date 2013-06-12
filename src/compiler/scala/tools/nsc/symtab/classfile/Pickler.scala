@@ -77,11 +77,7 @@ abstract class Pickler extends SubComponent {
         }
 
         if (!t.isDef && t.hasSymbolField && t.symbol.isTermMacro) {
-          unit.error(t.pos, t.symbol.typeParams.length match {
-            case 0 => "macro has not been expanded"
-            case 1 => "this type parameter must be specified"
-            case _ => "these type parameters must be specified"
-          })
+          unit.error(t.pos, "macro has not been expanded")
           return
         }
       }
@@ -148,9 +144,34 @@ abstract class Pickler extends SubComponent {
         true
     }
 
+    /** If the symbol is a type skolem, deskolemize and log it.
+     *  If we fail to deskolemize, in a method like
+     *    trait Trait[+A] { def f[CC[X]] : CC[A] }
+     *  the applied type CC[A] will hold a different CC symbol
+     *  than the type-constructor type-parameter CC.
+     */
+    private def deskolemize(sym: Symbol) = {
+      if (sym.isTypeSkolem) {
+        val sym1 = sym.deSkolemize
+        log({
+          val what0 = sym.defString
+          val what = sym1.defString match {
+            case `what0` => what0
+            case other   => what0 + "->" + other
+          }
+          val where = sym.enclMethod.fullLocationString
+          s"deskolemizing $what in $where"
+        })
+        sym1
+      }
+      else sym
+    }
+
     /** Store symbol in index. If symbol is local, also store everything it references.
      */
-    def putSymbol(sym: Symbol) {
+    def putSymbol(sym0: Symbol) {
+      val sym = deskolemize(sym0)
+
       if (putEntry(sym)) {
         if (isLocal(sym)) {
           putEntry(sym.name)
@@ -206,7 +227,7 @@ abstract class Pickler extends SubComponent {
         case RefinedType(parents, decls) =>
           val rclazz = tp.typeSymbol
           for (m <- decls.iterator)
-            if (m.owner != rclazz) assert(false, "bad refinement member "+m+" of "+tp+", owner = "+m.owner)
+            if (m.owner != rclazz) abort("bad refinement member "+m+" of "+tp+", owner = "+m.owner)
           putSymbol(rclazz); putTypes(parents); putSymbols(decls.toList)
         case ClassInfoType(parents, decls, clazz) =>
           putSymbol(clazz); putTypes(parents); putSymbols(decls.toList)
@@ -503,7 +524,13 @@ abstract class Pickler extends SubComponent {
 
     /** Write a reference to object, i.e., the object's number in the map index.
      */
-    private def writeRef(ref: AnyRef) { writeNat(index(ref)) }
+    private def writeRef(ref0: AnyRef) {
+      val ref = ref0 match {
+        case sym: Symbol => deskolemize(sym)
+        case _           => ref0
+      }
+      writeNat(index(ref))
+    }
     private def writeRefs(refs: List[AnyRef]) { refs foreach writeRef }
     private def writeRefsWithLength(refs: List[AnyRef]) {
       writeNat(refs.length)

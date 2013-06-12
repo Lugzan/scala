@@ -4,8 +4,8 @@ package scala.tools.nsc
 package doc
 package model
 
-import comment._
-
+import base._
+import base.comment._
 import diagram._
 
 import scala.collection._
@@ -233,8 +233,8 @@ class ModelFactory(val global: Global, val settings: doc.Settings) {
    *  exists, but should not be documented (either it's not included in the source or it's not visible)
    */
   class NoDocTemplateImpl(sym: Symbol, inTpl: TemplateImpl) extends EntityImpl(sym, inTpl) with TemplateImpl with HigherKindedImpl with NoDocTemplate {
-    assert(modelFinished)
-    assert(!(noDocTemplatesCache isDefinedAt sym))
+    assert(modelFinished, this)
+    assert(!(noDocTemplatesCache isDefinedAt sym), (sym, noDocTemplatesCache(sym)))
     noDocTemplatesCache += (sym -> this)
     def isDocTemplate = false
   }
@@ -269,7 +269,7 @@ class ModelFactory(val global: Global, val settings: doc.Settings) {
     *  All ancestors of the template and all non-package members.
     */
   abstract class DocTemplateImpl(sym: Symbol, inTpl: DocTemplateImpl) extends MemberTemplateImpl(sym, inTpl) with DocTemplateEntity {
-    assert(!modelFinished)
+    assert(!modelFinished, (sym, inTpl))
     assert(!(docTemplatesCache isDefinedAt sym), sym)
     docTemplatesCache += (sym -> this)
 
@@ -277,11 +277,14 @@ class ModelFactory(val global: Global, val settings: doc.Settings) {
       inform("Creating doc template for " + sym)
 
     override def toRoot: List[DocTemplateImpl] = this :: inTpl.toRoot
-    def inSource =
-      if (sym.sourceFile != null && ! sym.isSynthetic)
-        Some((sym.sourceFile, sym.pos.line))
+
+    protected def inSourceFromSymbol(symbol: Symbol) =
+      if (symbol.sourceFile != null && ! symbol.isSynthetic)
+        Some((symbol.sourceFile, symbol.pos.line))
       else
         None
+
+    def inSource = inSourceFromSymbol(sym)
 
     def sourceUrl = {
       def fixPath(s: String) = s.replaceAll("\\" + java.io.File.separator, "/")
@@ -470,11 +473,11 @@ class ModelFactory(val global: Global, val settings: doc.Settings) {
   abstract class PackageImpl(sym: Symbol, inTpl: PackageImpl) extends DocTemplateImpl(sym, inTpl) with Package {
     override def inTemplate = inTpl
     override def toRoot: List[PackageImpl] = this :: inTpl.toRoot
-    override lazy val linearization = {
-      val symbol = sym.info.members.find {
+    override lazy val (inSource, linearization) = {
+      val representive = sym.info.members.find {
         s => s.isPackageObject
       } getOrElse sym
-      linearizationFromSymbol(symbol)
+      (inSourceFromSymbol(representive), linearizationFromSymbol(representive))
     }
     def packages = members collect { case p: PackageImpl if !(droppedPackages contains p) => p }
   }
@@ -620,7 +623,7 @@ class ModelFactory(val global: Global, val settings: doc.Settings) {
      */
     def createTemplate(aSym: Symbol, inTpl: DocTemplateImpl): Option[MemberImpl] = {
       // don't call this after the model finished!
-      assert(!modelFinished)
+      assert(!modelFinished, (aSym, inTpl))
 
       def createRootPackageComment: Option[Comment] =
         if(settings.docRootContent.isDefault) None
@@ -636,7 +639,7 @@ class ModelFactory(val global: Global, val settings: doc.Settings) {
         }
 
       def createDocTemplate(bSym: Symbol, inTpl: DocTemplateImpl): DocTemplateImpl = {
-        assert(!modelFinished) // only created BEFORE the model is finished
+        assert(!modelFinished, (bSym, inTpl)) // only created BEFORE the model is finished
         if (bSym.isAliasType && bSym != AnyRefClass)
           new DocTemplateImpl(bSym, inTpl) with AliasImpl with AliasType { override def isAliasType = true }
         else if (bSym.isAbstractType)
@@ -842,24 +845,28 @@ class ModelFactory(val global: Global, val settings: doc.Settings) {
       lazy val annotationClass =
         makeTemplate(annot.symbol)
       val arguments = { // lazy
-        def noParams = annot.args map { _ => None }
+        def annotArgs = annot.args match {
+          case Nil => annot.assocs collect { case (_, LiteralAnnotArg(const)) => Literal(const) }
+          case xs  => xs
+        }
+        def noParams = annotArgs map (_ => None)
+
         val params: List[Option[ValueParam]] = annotationClass match {
           case aClass: DocTemplateEntity with Class =>
             (aClass.primaryConstructor map { _.valueParams.head }) match {
               case Some(vps) => vps map { Some(_) }
-              case None => noParams
+              case _         => noParams
             }
           case _ => noParams
         }
-        assert(params.length == annot.args.length)
-        (params zip annot.args) flatMap { case (param, arg) =>
-          makeTree(arg) match {
-            case Some(tree) =>
-              Some(new ValueArgument {
-                def parameter = param
-                def value = tree
-              })
-            case None => None
+        assert(params.length == annotArgs.length, (params, annotArgs))
+
+        params zip annotArgs flatMap { case (param, arg) =>
+          makeTree(arg) map { tree =>
+            new ValueArgument {
+              def parameter = param
+              def value     = tree
+            }
           }
         }
       }
@@ -891,7 +898,16 @@ class ModelFactory(val global: Global, val settings: doc.Settings) {
           // units.filter should return only one element
           (currentRun.units filter (_.source.file == aSym.sourceFile)).toList match {
             case List(unit) =>
-              (unit.body find (_.symbol == aSym)) match {
+              // SI-4922 `sym == aSym` is insufficent if `aSym` is a clone of symbol
+              //         of the parameter in the tree, as can happen with type parametric methods.
+              def isCorrespondingParam(sym: Symbol) = (
+                sym != null &&
+                sym != NoSymbol &&
+                sym.owner == aSym.owner &&
+                sym.name == aSym.name &&
+                sym.isParamWithDefault
+              )
+              (unit.body find (t => isCorrespondingParam(t.symbol))) match {
                 case Some(ValDef(_,_,_,rhs)) => makeTree(rhs)
                 case _ => None
               }
@@ -1025,32 +1041,5 @@ class ModelFactory(val global: Global, val settings: doc.Settings) {
     (bSym.isAliasType || bSym.isAbstractType) &&
     { val rawComment = global.expandedDocComment(bSym, inTpl.sym)
       rawComment.contains("@template") || rawComment.contains("@documentable") }
-
-  def findExternalLink(sym: Symbol, name: String): Option[LinkTo] = {
-    val sym1 =
-      if (sym == AnyClass || sym == AnyRefClass || sym == AnyValClass || sym == NothingClass) ListClass
-      else if (sym.isPackage)
-        /* Get package object which has associatedFile ne null */
-        sym.info.member(newTermName("package"))
-      else sym
-    Option(sym1.associatedFile) flatMap (_.underlyingSource) flatMap { src =>
-      val path = src.path
-      settings.extUrlMapping get path map { url =>
-        LinkToExternal(name, url + "#" + name)
-      }
-    } orElse {
-      // Deprecated option.
-      settings.extUrlPackageMapping find {
-        case (pkg, _) => name startsWith pkg
-      } map {
-        case (_, url) => LinkToExternal(name, url + "#" + name)
-      }
-    }
-  }
-
-  def externalSignature(sym: Symbol) = {
-    sym.info // force it, otherwise we see lazy types
-    (sym.nameString + sym.signatureString).replaceAll("\\s", "")
-  }
 }
 

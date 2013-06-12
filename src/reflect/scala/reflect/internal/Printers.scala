@@ -67,12 +67,12 @@ trait Printers extends api.Printers { self: SymbolTable =>
     printIds = settings.uniqid.value
     printKinds = settings.Yshowsymkinds.value
     printMirrors = false // typically there's no point to print mirrors inside the compiler, as there is only one mirror there
-    protected def doPrintPositions = settings.Xprintpos.value
+    printPositions = settings.Xprintpos.value
 
     def indent() = indentMargin += indentStep
     def undent() = indentMargin -= indentStep
 
-    def printPosition(tree: Tree) = if (doPrintPositions) print(tree.pos.show)
+    def printPosition(tree: Tree) = if (printPositions) print(tree.pos.show)
 
     def println() {
       out.println()
@@ -389,7 +389,7 @@ trait Printers extends api.Printers { self: SymbolTable =>
           print(x.escapedStringValue)
 
         case tt: TypeTree =>
-          if ((tree.tpe eq null) || (doPrintPositions && tt.original != null)) {
+          if ((tree.tpe eq null) || (printPositions && tt.original != null)) {
             if (tt.original != null) print("<type: ", tt.original, ">")
             else print("<type ?>")
           } else if ((tree.tpe.typeSymbol ne null) && tree.tpe.typeSymbol.isAnonymousClass) {
@@ -435,7 +435,7 @@ trait Printers extends api.Printers { self: SymbolTable =>
         case tree =>
           xprintTree(this, tree)
       }
-      if (printTypes && tree.isTerm && !tree.isEmpty) {
+      if (printTypes && tree.isTerm && tree.canHaveAttrs) {
         print("{", if (tree.tpe eq null) "<null>" else tree.tpe.toString, "}")
       }
     }
@@ -540,14 +540,17 @@ trait Printers extends api.Printers { self: SymbolTable =>
           print(")")
         case EmptyTree =>
           print("EmptyTree")
-        case emptyValDef: AnyRef if emptyValDef eq self.emptyValDef =>
+        case self.emptyValDef =>
           print("emptyValDef")
+        case self.pendingSuperCall =>
+          print("pendingSuperCall")
         case tree: Tree =>
           val hasSymbolField = tree.hasSymbolField && tree.symbol != NoSymbol
           val isError = hasSymbolField && tree.symbol.name.toString == nme.ERROR.toString
           printProduct(
             tree,
             preamble = _ => {
+              if (printPositions) print(tree.pos.show)
               print(tree.productPrefix)
               if (printTypes && tree.tpe != null) print(tree.tpe)
             },
@@ -670,7 +673,7 @@ trait Printers extends api.Printers { self: SymbolTable =>
     case nme.CONSTRUCTOR => "nme.CONSTRUCTOR"
     case nme.ROOTPKG => "nme.ROOTPKG"
     case _ =>
-      val prefix = if (name.isTermName) "newTermName(\"" else "newTypeName(\""
+      val prefix = if (name.isTermName) "TermName(\"" else "TypeName(\""
       prefix + name.toString + "\")"
   }
 

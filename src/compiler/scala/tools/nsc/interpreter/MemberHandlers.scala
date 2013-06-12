@@ -48,16 +48,19 @@ trait MemberHandlers {
     }
   }
 
+  private def isTermMacro(ddef: DefDef): Boolean = ddef.mods.isMacro
+
   def chooseHandler(member: Tree): MemberHandler = member match {
-    case member: DefDef        => new DefHandler(member)
-    case member: ValDef        => new ValHandler(member)
-    case member: ModuleDef     => new ModuleHandler(member)
-    case member: ClassDef      => new ClassHandler(member)
-    case member: TypeDef       => new TypeAliasHandler(member)
-    case member: Assign        => new AssignHandler(member)
-    case member: Import        => new ImportHandler(member)
-    case DocDef(_, documented) => chooseHandler(documented)
-    case member                => new GenericHandler(member)
+    case member: DefDef if isTermMacro(member) => new TermMacroHandler(member)
+    case member: DefDef                        => new DefHandler(member)
+    case member: ValDef                        => new ValHandler(member)
+    case member: ModuleDef                     => new ModuleHandler(member)
+    case member: ClassDef                      => new ClassHandler(member)
+    case member: TypeDef                       => new TypeAliasHandler(member)
+    case member: Assign                        => new AssignHandler(member)
+    case member: Import                        => new ImportHandler(member)
+    case DocDef(_, documented)                 => chooseHandler(documented)
+    case member                                => new GenericHandler(member)
   }
 
   sealed abstract class MemberDefHandler(override val member: MemberDef) extends MemberHandler(member) {
@@ -116,18 +119,27 @@ trait MemberHandlers {
           if (replProps.vids) s"""" + " @ " + "%%8x".format(System.identityHashCode($path)) + " """.trim
           else ""
 
-        """ + "%s%s: %s = " + %s""".format(prettyName, vidString, string2code(req typeOf name), resultString)
+        """ + "%s%s: %s = " + %s""".format(string2code(prettyName), vidString, string2code(req typeOf name), resultString)
       }
     }
   }
 
   class DefHandler(member: DefDef) extends MemberDefHandler(member) {
-    private def vparamss = member.vparamss
-    private def isMacro = member.symbol hasFlag MACRO
-    // true if not a macro and 0-arity
-    override def definesValue = !isMacro && flattensToEmpty(vparamss)
+    override def definesValue = flattensToEmpty(member.vparamss) // true if 0-arity
     override def resultExtractionCode(req: Request) =
       if (mods.isPublic) codegenln(name, ": ", req.typeOf(name)) else ""
+  }
+
+  abstract class MacroHandler(member: DefDef) extends MemberDefHandler(member) {
+    override def definesValue = false
+    override def definesTerm: Option[TermName] = Some(name.toTermName)
+    override def definesType: Option[TypeName] = None
+    override def resultExtractionCode(req: Request) = if (mods.isPublic) codegenln(notification(req)) else ""
+    def notification(req: Request): String
+  }
+
+  class TermMacroHandler(member: DefDef) extends MacroHandler(member) {
+    def notification(req: Request) = s"defined term macro $name: ${req.typeOf(name)}"
   }
 
   class AssignHandler(member: Assign) extends MemberHandler(member) {
@@ -143,16 +155,15 @@ trait MemberHandlers {
     override def resultExtractionCode(req: Request) = {
       val lhsType = string2code(req lookupTypeOf name)
       val res     = string2code(req fullPath name)
-
-      """ + "%s: %s = " + %s + "\n" """.format(lhs, lhsType, res) + "\n"
+      """ + "%s: %s = " + %s + "\n" """.format(string2code(lhs.toString), lhsType, res) + "\n"
     }
   }
 
   class ModuleHandler(module: ModuleDef) extends MemberDefHandler(module) {
-    override def definesTerm = Some(name)
+    override def definesTerm = Some(name.toTermName)
     override def definesValue = true
 
-    override def resultExtractionCode(req: Request) = codegenln("defined module ", name)
+    override def resultExtractionCode(req: Request) = codegenln("defined object ", name)
   }
 
   class ClassHandler(member: ClassDef) extends MemberDefHandler(member) {

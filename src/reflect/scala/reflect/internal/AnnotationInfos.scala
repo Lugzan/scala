@@ -12,7 +12,7 @@ import scala.collection.immutable.ListMap
 
 /** AnnotationInfo and its helpers */
 trait AnnotationInfos extends api.Annotations { self: SymbolTable =>
-  import definitions.{ ThrowsClass, StaticAnnotationClass, isMetaAnnotation }
+  import definitions.{ ThrowsClass, ThrowableClass, StaticAnnotationClass, isMetaAnnotation }
 
   // Common annotation code between Symbol and Type.
   // For methods altering the annotation list, on Symbol it mutates
@@ -30,6 +30,17 @@ trait AnnotationInfos extends api.Annotations { self: SymbolTable =>
      */
     def throwsAnnotations(): List[Symbol] = annotations collect {
       case ThrownException(exc) => exc
+    }
+
+    def addThrowsAnnotation(throwableSym: Symbol): Self = {
+      val throwableTpe = if (throwableSym.isMonomorphicType) throwableSym.tpe else {
+        debuglog(s"Encountered polymorphic exception `${throwableSym.fullName}` while parsing class file.")
+        // in case we encounter polymorphic exception the best we can do is to convert that type to
+        // monomorphic one by introducing existentials, see SI-7009 for details
+        existentialAbstraction(throwableSym.typeParams, throwableSym.tpe)
+      }
+      val throwsAnn = AnnotationInfo(appliedType(definitions.ThrowsClass, throwableTpe), List(Literal(Constant(throwableTpe))), Nil)
+      withAnnotations(List(throwsAnn))
     }
 
     /** Tests for, get, or remove an annotation */
@@ -200,6 +211,8 @@ trait AnnotationInfos extends api.Annotations { self: SymbolTable =>
     override def toString = if (forced) forcedInfo.toString else "@<?>"
 
     override def pos: Position = if (forced) forcedInfo.pos else NoPosition
+
+    override def completeInfo(): Unit = forcedInfo
   }
 
   /** Typed information about an annotation. It can be attached to either
@@ -240,6 +253,9 @@ trait AnnotationInfos extends api.Annotations { self: SymbolTable =>
       rawpos = pos
       this
     }
+
+    // Forces LazyAnnotationInfo, no op otherwise
+    def completeInfo(): Unit = ()
 
     /** Annotations annotating annotations are confusing so I drew
      *  an example.  Given the following code:
@@ -321,13 +337,15 @@ trait AnnotationInfos extends api.Annotations { self: SymbolTable =>
 
   object UnmappableAnnotation extends CompleteAnnotationInfo(NoType, Nil, Nil)
 
+  object ErroneousAnnotation extends CompleteAnnotationInfo(ErrorType, Nil, Nil)
+
   /** Extracts symbol of thrown exception from AnnotationInfo.
     *
     * Supports both “old-style” `@throws(classOf[Exception])`
     * as well as “new-stye” `@throws[Exception]("cause")` annotations.
     */
   object ThrownException {
-    def unapply(ann: AnnotationInfo): Option[Symbol] =
+    def unapply(ann: AnnotationInfo): Option[Symbol] = {
       ann match {
         case AnnotationInfo(tpe, _, _) if tpe.typeSymbol != ThrowsClass =>
           None
@@ -335,8 +353,11 @@ trait AnnotationInfos extends api.Annotations { self: SymbolTable =>
         case AnnotationInfo(_, List(Literal(Constant(tpe: Type))), _) =>
           Some(tpe.typeSymbol)
         // new-style: @throws[Exception], @throws[Exception]("cause")
-        case AnnotationInfo(TypeRef(_, _, args), _, _) =>
-          Some(args.head.typeSymbol)
+        case AnnotationInfo(TypeRef(_, _, arg :: _), _, _) =>
+          Some(arg.typeSymbol)
+        case AnnotationInfo(TypeRef(_, _, Nil), _, _) =>
+          Some(ThrowableClass)
       }
+    }
   }
 }

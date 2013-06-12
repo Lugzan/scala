@@ -39,7 +39,7 @@ trait Contexts { self: Analyzer =>
   def ambiguousDefnAndImport(owner: Symbol, imp: ImportInfo) =
     LookupAmbiguous(s"it is both defined in $owner and imported subsequently by \n$imp")
 
-  private val startContext = {
+  private lazy val startContext = {
     NoContext.make(
     Template(List(), emptyValDef, List()) setSymbol global.NoSymbol setType global.NoType,
     rootMirror.RootClass,
@@ -106,8 +106,8 @@ trait Contexts { self: Analyzer =>
     var sc = startContext
     while (sc != NoContext) {
       sc.tree match {
-        case Import(qual, _) => qual.tpe = singleType(qual.symbol.owner.thisType, qual.symbol)
-        case _ =>
+        case Import(qual, _) => qual setType singleType(qual.symbol.owner.thisType, qual.symbol)
+        case _               =>
       }
       sc = sc.outer
     }
@@ -138,7 +138,7 @@ trait Contexts { self: Analyzer =>
     }
 
     var enclMethod: Context = _             // The next outer context whose tree is a method
-    var variance: Int = _                   // Variance relative to enclosing class
+    var variance: Variance = Variance.Invariant     // Variance relative to enclosing class
     private var _undetparams: List[Symbol] = List() // Undetermined type parameters,
                                                     // not inherited to child contexts
     var depth: Int = 0
@@ -169,6 +169,7 @@ trait Contexts { self: Analyzer =>
     def typingIndent = "  " * typingIndentLevel
 
     var buffer: mutable.Set[AbsTypeError] = _
+    var warningsBuffer: mutable.Set[(Position, String)] = _
 
     def enclClassOrMethod: Context =
       if ((owner eq NoSymbol) || (owner.isClass) || (owner.isMethod)) this
@@ -190,6 +191,7 @@ trait Contexts { self: Analyzer =>
 
     def errBuffer = buffer
     def hasErrors = buffer.nonEmpty
+    def hasWarnings = warningsBuffer.nonEmpty
 
     def state: Int = mode
     def restoreState(state0: Int) = mode = state0
@@ -216,6 +218,11 @@ trait Contexts { self: Analyzer =>
     def flushAndReturnBuffer(): mutable.Set[AbsTypeError] = {
       val current = buffer.clone()
       buffer.clear()
+      current
+    }
+    def flushAndReturnWarningsBuffer(): mutable.Set[(Position, String)] = {
+      val current = warningsBuffer.clone()
+      warningsBuffer.clear()
       current
     }
 
@@ -305,6 +312,7 @@ trait Contexts { self: Analyzer =>
       c.retyping = this.retyping
       c.openImplicits = this.openImplicits
       c.buffer = if (this.buffer == null) mutable.LinkedHashSet[AbsTypeError]() else this.buffer // need to initialize
+      c.warningsBuffer = if (this.warningsBuffer == null) mutable.LinkedHashSet[(Position, String)]() else this.warningsBuffer
       registerContext(c.asInstanceOf[analyzer.Context])
       debuglog("[context] ++ " + c.unit + " / " + tree.summaryString)
       c
@@ -353,6 +361,16 @@ trait Contexts { self: Analyzer =>
       c
     }
 
+    /**
+     * A context for typing constructor parameter ValDefs, super or self invocation arguments and default getters
+     * of constructors. These expressions need to be type checked in a scope outside the class, cf. spec 5.3.1.
+     *
+     * This method is called by namer / typer where `this` is the context for the constructor DefDef. The
+     * owner of the resulting (new) context is the outer context for the Template, i.e. the context for the
+     * ClassDef. This means that class type parameters will be in scope. The value parameters of the current
+     * constructor are also entered into the new constructor scope. Members of the class however will not be
+     * accessible.
+     */
     def makeConstructorContext = {
       var baseContext = enclClass.outer
       while (baseContext.tree.isInstanceOf[Template])
@@ -372,6 +390,8 @@ trait Contexts { self: Analyzer =>
           enterLocalElems(c.scope.elems)
         }
       }
+      // Enter the scope elements of this (the scope for the constructor DefDef) into the new constructor scope.
+      // Concretely, this will enter the value parameters of constructor.
       enterElems(this)
       argContext
     }
@@ -427,6 +447,7 @@ trait Contexts { self: Analyzer =>
     def warning(pos: Position, msg: String): Unit = warning(pos, msg, false)
     def warning(pos: Position, msg: String, force: Boolean) {
       if (reportErrors || force) unit.warning(pos, msg)
+      else if (bufferErrors) warningsBuffer += ((pos, msg))
     }
 
     def isLocal(): Boolean = tree match {
@@ -436,16 +457,7 @@ trait Contexts { self: Analyzer =>
       case _                => outer.isLocal()
     }
 
-    /** Fast path for some slow checks (ambiguous assignment in Refchecks, and
-     *  existence of __match for MatchTranslation in virtpatmat.) This logic probably
-     *  needs improvement.
-     */
-    def isNameInScope(name: Name) = (
-      enclosingContextChain exists (ctx =>
-           (ctx.scope.lookupEntry(name) != null)
-        || (ctx.owner.rawInfo.member(name) != NoSymbol)
-      )
-    )
+    def isNameInScope(name: Name) = lookupSymbol(name, _ => true).isSuccess
 
     // nextOuter determines which context is searched next for implicits
     // (after `this`, which contributes `newImplicits` below.) In
@@ -618,7 +630,14 @@ trait Contexts { self: Analyzer =>
         new ImplicitInfo(sym.name, pre, sym)
 
     private def collectImplicitImports(imp: ImportInfo): List[ImplicitInfo] = {
-      val pre = imp.qual.tpe
+      val qual = imp.qual
+
+      val pre =
+        if (qual.tpe.typeSymbol.isPackageClass)
+          // SI-6225 important if the imported symbol is inherited by the the package object.
+          singleType(qual.tpe, qual.tpe member nme.PACKAGE)
+        else
+          qual.tpe
       def collect(sels: List[ImportSelector]): List[ImplicitInfo] = sels match {
         case List() =>
           List()
@@ -802,6 +821,12 @@ trait Contexts { self: Analyzer =>
           case _                                => LookupSucceeded(qual, sym)
         }
       )
+      def finishDefSym(sym: Symbol, pre0: Type): NameLookup =
+        if (requiresQualifier(sym))
+          finish(gen.mkAttributedQualifier(pre0), sym)
+        else
+          finish(EmptyTree, sym)
+
       def isPackageOwnedInDifferentUnit(s: Symbol) = (
         s.isDefinedInPackage && (
              !currentRun.compiles(s)
@@ -825,17 +850,36 @@ trait Contexts { self: Analyzer =>
 
         found1
       }
+
+      def lookupInScope(scope: Scope) =
+        (scope lookupUnshadowedEntries name filter (e => qualifies(e.sym))).toList
+
+      def newOverloaded(owner: Symbol, pre: Type, entries: List[ScopeEntry]) =
+        logResult(s"!!! lookup overloaded")(owner.newOverloaded(pre, entries map (_.sym)))
+
+      // Constructor lookup should only look in the decls of the enclosing class
+      // not in the self-type, nor in the enclosing context, nor in imports (SI-4460, SI-6745)
+      if (name == nme.CONSTRUCTOR) return {
+        val enclClassSym = cx.enclClass.owner
+        val scope = cx.enclClass.prefix.baseType(enclClassSym).decls
+        val constructorSym = lookupInScope(scope) match {
+          case Nil       => NoSymbol
+          case hd :: Nil => hd.sym
+          case entries   => newOverloaded(enclClassSym, cx.enclClass.prefix, entries)
+        }
+        finishDefSym(constructorSym, cx.enclClass.prefix)
+      }
+
       // cx.scope eq null arises during FixInvalidSyms in Duplicators
       while (defSym == NoSymbol && (cx ne NoContext) && (cx.scope ne null)) {
-        pre         = cx.enclClass.prefix
-        val entries = (cx.scope lookupUnshadowedEntries name filter (e => qualifies(e.sym))).toList
-        defSym      = entries match {
-          case Nil       => searchPrefix
-          case hd :: tl  =>
+        pre    = cx.enclClass.prefix
+        defSym = lookupInScope(cx.scope) match {
+          case Nil                  => searchPrefix
+          case entries @ (hd :: tl) =>
             // we have a winner: record the symbol depth
             symbolDepth = (cx.depth - cx.scope.nestingLevel) + hd.depth
             if (tl.isEmpty) hd.sym
-            else logResult(s"!!! lookup overloaded")(cx.owner.newOverloaded(pre, entries map (_.sym)))
+            else newOverloaded(cx.owner, pre, entries)
         }
         if (!defSym.exists)
           cx = cx.outer // push further outward
@@ -873,12 +917,8 @@ trait Contexts { self: Analyzer =>
       }
 
       // At this point only one or the other of defSym and impSym might be set.
-      if (defSym.exists) {
-        if (requiresQualifier(defSym))
-          finish(gen.mkAttributedQualifier(pre), defSym)
-        else
-          finish(EmptyTree, defSym)
-      }
+      if (defSym.exists)
+        finishDefSym(defSym, pre)
       else if (impSym.exists) {
         // We continue walking down the imports as long as the tail is non-empty, which gives us:
         //   imports  ==  imp1 :: imp2 :: _
@@ -996,7 +1036,14 @@ trait Contexts { self: Analyzer =>
       if (settings.lint.value && selectors.nonEmpty && result != NoSymbol && pos != NoPosition)
         recordUsage(current, result)
 
-      result
+      // Harden against the fallout from bugs like SI-6745
+      //
+      // [JZ] I considered issuing a devWarning and moving the
+      //      check inside the above loop, as I believe that
+      //      this always represents a mistake on the part of
+      //      the caller.
+      if (definitions isImportable result) result
+      else NoSymbol
     }
     private def selectorString(s: ImportSelector): String = {
       if (s.name == nme.WILDCARD && s.rename == null) "_"

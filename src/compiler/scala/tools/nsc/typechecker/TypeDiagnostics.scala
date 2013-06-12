@@ -169,11 +169,6 @@ trait TypeDiagnostics {
     case xs   => " where " + (disambiguate(xs map (_.existentialToString)) mkString ", ")
   }
 
-  def varianceWord(sym: Symbol): String =
-    if (sym.variance == 1) "covariant"
-    else if (sym.variance == -1) "contravariant"
-    else "invariant"
-
   def explainAlias(tp: Type) = {
     // Don't automatically normalize standard aliases; they still will be
     // expanded if necessary to disambiguate simple identifiers.
@@ -218,12 +213,12 @@ trait TypeDiagnostics {
                   // force measures than comparing normalized Strings were producing error messages
                   // like "and java.util.ArrayList[String] <: java.util.ArrayList[String]" but there
                   // should be a cleaner way to do this.
-                  if (found.normalize.toString == tp.normalize.toString) ""
+                  if (found.dealiasWiden.toString == tp.dealiasWiden.toString) ""
                   else " (and %s <: %s)".format(found, tp)
                 )
                 val explainDef = {
                   val prepend = if (isJava) "Java-defined " else ""
-                  "%s%s is %s in %s.".format(prepend, reqsym, varianceWord(param), param)
+                  "%s%s is %s in %s.".format(prepend, reqsym, param.variance, param)
                 }
                 // Don't suggest they change the class declaration if it's somewhere
                 // under scala.* or defined in a java class, because attempting either
@@ -243,7 +238,7 @@ trait TypeDiagnostics {
                 || ((arg <:< reqArg) && param.isCovariant)
                 || ((reqArg <:< arg) && param.isContravariant)
               )
-              val invariant = param.variance == 0
+              val invariant = param.variance.isInvariant
 
               if (conforms)                             Some("")
               else if ((arg <:< reqArg) && invariant)   mkMsg(true)   // covariant relationship
@@ -480,7 +475,7 @@ trait TypeDiagnostics {
           && (m.isPrivate || m.isLocal)
           && !targets(m)
           && !(m.name == nme.WILDCARD)              // e.g. val _ = foo
-          && !ignoreNames(m.name)                   // serialization methods
+          && !ignoreNames(m.name.toTermName)        // serialization methods
           && !isConstantType(m.info.resultType)     // subject to constant inlining
           && !treeTypes.exists(_ contains m)        // e.g. val a = new Foo ; new a.Bar
         )
@@ -530,17 +525,24 @@ trait TypeDiagnostics {
     }
 
     object checkDead {
-      private var expr: Symbol = NoSymbol
+      private val exprStack: mutable.Stack[Symbol] = mutable.Stack(NoSymbol)
+      // The method being applied to `tree` when `apply` is called.
+      private def expr = exprStack.top
 
       private def exprOK =
         (expr != Object_synchronized) &&
         !(expr.isLabel && treeInfo.isSynthCaseSymbol(expr)) // it's okay to jump to matchEnd (or another case) with an argument of type nothing
 
-      private def treeOK(tree: Tree) = tree.tpe != null && tree.tpe.typeSymbol == NothingClass
+      private def treeOK(tree: Tree) = {
+        val isLabelDef = tree match { case _: LabelDef => true; case _ => false}
+        tree.tpe != null && tree.tpe.typeSymbol == NothingClass && !isLabelDef
+      }
 
-      def updateExpr(fn: Tree) = {
-        if (fn.symbol != null && fn.symbol.isMethod && !fn.symbol.isConstructor)
-          checkDead.expr = fn.symbol
+      @inline def updateExpr[A](fn: Tree)(f: => A) = {
+        if (fn.symbol != null && fn.symbol.isMethod && !fn.symbol.isConstructor) {
+          exprStack push fn.symbol
+          try f finally exprStack.pop()
+        } else f
       }
       def apply(tree: Tree): Tree = {
         // Error suppression will squash some of these warnings unless we circumvent it.
@@ -552,7 +554,7 @@ trait TypeDiagnostics {
       }
 
       // The checkDead call from typedArg is more selective.
-      def inMode(mode: Int, tree: Tree): Tree = {
+      def inMode(mode: Mode, tree: Tree): Tree = {
         val modeOK = (mode & (EXPRmode | BYVALmode | POLYmode)) == (EXPRmode | BYVALmode)
         if (modeOK) apply(tree)
         else tree

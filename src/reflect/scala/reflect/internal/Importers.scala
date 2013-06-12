@@ -333,6 +333,8 @@ trait Importers extends api.Importers { self: SymbolTable =>
           new ModuleDef(importModifiers(mods), importName(name).toTermName, importTemplate(impl))
         case from.emptyValDef =>
           emptyValDef
+        case from.pendingSuperCall =>
+          pendingSuperCall
         case from.ValDef(mods, name, tpt, rhs) =>
           new ValDef(importModifiers(mods), importName(name).toTermName, importTree(tpt), importTree(rhs))
         case from.DefDef(mods, name, tparams, vparamss, tpt, rhs) =>
@@ -437,7 +439,7 @@ trait Importers extends api.Importers { self: SymbolTable =>
               if (tt.original != null) mytt.setOriginal(importTree(tt.original))
             case _ =>
               if (mytree.hasSymbolField) mytree.symbol = importSymbol(tree.symbol)
-              mytree.tpe = importType(tree.tpe)
+              mytree setType importType(tree.tpe)
           }
         }
       })

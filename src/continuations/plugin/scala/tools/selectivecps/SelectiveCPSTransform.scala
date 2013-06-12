@@ -17,6 +17,8 @@ abstract class SelectiveCPSTransform extends PluginComponent with
   import definitions._             // standard classes and methods
   import typer.atOwner             // methods to type trees
 
+  override def description = "@cps-driven transform of selectiveanf assignments"
+
   /** the following two members override abstract members in Transform */
   val phaseName: String = "selectivecps"
 
@@ -85,7 +87,7 @@ abstract class SelectiveCPSTransform extends PluginComponent with
             //gen.mkAttributedSelect(gen.mkAttributedSelect(gen.mkAttributedSelect(gen.mkAttributedIdent(ScalaPackage),
             //ScalaPackage.tpe.member("util")), ScalaPackage.tpe.member("util").tpe.member("continuations")), MethShiftR)
             //gen.mkAttributedRef(ModCPS.tpe,  MethShiftR) // TODO: correct?
-            debuglog("funR.tpe = " + funR.tpe)
+            debuglog("funR.tpe: " + funR.tpe)
             Apply(
                 TypeApply(funR, targs).setType(appliedType(funR.tpe, targs.map((t:Tree) => t.tpe))),
                 args.map(transform(_))
@@ -97,7 +99,7 @@ abstract class SelectiveCPSTransform extends PluginComponent with
           debuglog("found shiftUnit: " + tree)
           atPos(tree.pos) {
             val funR = gen.mkAttributedRef(MethShiftUnitR) // TODO: correct?
-            debuglog("funR.tpe = " + funR.tpe)
+            debuglog("funR.tpe: " + funR.tpe)
             Apply(
                 TypeApply(funR, List(targs(0), targs(1))).setType(appliedType(funR.tpe,
                     List(targs(0).tpe, targs(1).tpe))),
@@ -110,7 +112,7 @@ abstract class SelectiveCPSTransform extends PluginComponent with
           log("found reify: " + tree)
           atPos(tree.pos) {
             val funR = gen.mkAttributedRef(MethReifyR) // TODO: correct?
-            debuglog("funR.tpe = " + funR.tpe)
+            debuglog("funR.tpe: " + funR.tpe)
             Apply(
                 TypeApply(funR, targs).setType(appliedType(funR.tpe, targs.map((t:Tree) => t.tpe))),
                 args.map(transform(_))
@@ -345,7 +347,7 @@ abstract class SelectiveCPSTransform extends PluginComponent with
                   val ctxSym = currentOwner.newValue(newTermName("" + vd.symbol.name + cpsNames.shiftSuffix)).setInfo(rhs1.tpe)
                   val ctxDef = localTyper.typed(ValDef(ctxSym, rhs1))
                   def ctxRef = localTyper.typed(Ident(ctxSym))
-                  val argSym = currentOwner.newValue(vd.symbol.name).setInfo(tpe)
+                  val argSym = currentOwner.newValue(vd.symbol.name.toTermName).setInfo(tpe)
                   val argDef = localTyper.typed(ValDef(argSym, Select(ctxRef, ctxRef.tpe.member(cpsNames.getTrivialValue))))
                   val switchExpr = localTyper.typedPos(vd.symbol.pos) {
                     val body2 = mkBlock(bodyStms, bodyExpr).duplicate // dup before typing!

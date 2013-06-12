@@ -35,7 +35,7 @@ trait CPSUtils {
   lazy val MarkerCPSAdaptMinus = rootMirror.getRequiredClass("scala.util.continuations.cpsMinus")
 
   lazy val Context = rootMirror.getRequiredClass("scala.util.continuations.ControlContext")
-  lazy val ModCPS = rootMirror.getRequiredPackage("scala.util.continuations")
+  lazy val ModCPS = rootMirror.getPackage("scala.util.continuations")
 
   lazy val MethShiftUnit  = definitions.getMember(ModCPS, cpsNames.shiftUnit)
   lazy val MethShiftUnit0 = definitions.getMember(ModCPS, cpsNames.shiftUnit0)
@@ -61,7 +61,7 @@ trait CPSUtils {
   // annotation checker
 
   protected def annTypes(ann: AnnotationInfo): (Type, Type) = {
-    val tp0 :: tp1 :: Nil = ann.atp.normalize.typeArgs
+    val tp0 :: tp1 :: Nil = ann.atp.dealiasWiden.typeArgs
     ((tp0, tp1))
   }
   protected def hasMinusMarker(tpe: Type)   = tpe hasAnnotation MarkerCPSAdaptMinus

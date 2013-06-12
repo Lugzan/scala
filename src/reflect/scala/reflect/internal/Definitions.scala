@@ -14,7 +14,7 @@ import scala.reflect.api.{Universe => ApiUniverse}
 trait Definitions extends api.StandardDefinitions {
   self: SymbolTable =>
 
-  import rootMirror.{getModule, getClassByName, getRequiredClass, getRequiredModule, getRequiredPackage, getClassIfDefined, getModuleIfDefined, getPackageObject, getPackageObjectIfDefined, requiredClass, requiredModule}
+  import rootMirror.{getModule, getPackage, getClassByName, getRequiredClass, getRequiredModule, getClassIfDefined, getModuleIfDefined, getPackageObject, getPackageObjectIfDefined, requiredClass, requiredModule}
 
   object definitions extends DefinitionsClass
 
@@ -169,11 +169,11 @@ trait Definitions extends api.StandardDefinitions {
 
     // It becomes tricky to create dedicated objects for other symbols because
     // of initialization order issues.
-    lazy val JavaLangPackage      = getRequiredPackage(sn.JavaLang)
+    lazy val JavaLangPackage      = getPackage("java.lang")
     lazy val JavaLangPackageClass = JavaLangPackage.moduleClass.asClass
-    lazy val ScalaPackage         = getRequiredPackage(nme.scala_)
+    lazy val ScalaPackage         = getPackage("scala")
     lazy val ScalaPackageClass    = ScalaPackage.moduleClass.asClass
-    lazy val RuntimePackage       = getRequiredPackage("scala.runtime")
+    lazy val RuntimePackage       = getPackage("scala.runtime")
     lazy val RuntimePackageClass  = RuntimePackage.moduleClass.asClass
 
     // convenient one-argument parameter lists
@@ -401,7 +401,6 @@ trait Definitions extends api.StandardDefinitions {
     lazy val RemoteExceptionClass  = requiredClass[java.rmi.RemoteException]
 
     lazy val ByNameParamClass       = specialPolyClass(tpnme.BYNAME_PARAM_CLASS_NAME, COVARIANT)(_ => AnyClass.tpe)
-    lazy val EqualsPatternClass     = specialPolyClass(tpnme.EQUALS_PATTERN_NAME, 0L)(_ => AnyClass.tpe)
     lazy val JavaRepeatedParamClass = specialPolyClass(tpnme.JAVA_REPEATED_PARAM_CLASS_NAME, COVARIANT)(tparam => arrayType(tparam.tpe))
     lazy val RepeatedParamClass     = specialPolyClass(tpnme.REPEATED_PARAM_CLASS_NAME, COVARIANT)(tparam => seqType(tparam.tpe))
 
@@ -627,7 +626,7 @@ trait Definitions extends api.StandardDefinitions {
         len <= MaxTupleArity && sym == TupleClass(len)
       case _ => false
     }
-    def isTupleType(tp: Type) = isTupleTypeDirect(tp.normalize)
+    def isTupleType(tp: Type) = isTupleTypeDirect(tp.dealiasWiden)
 
     lazy val ProductRootClass: ClassSymbol = requiredClass[scala.Product]
       def Product_productArity          = getMemberMethod(ProductRootClass, nme.productArity)
@@ -649,16 +648,17 @@ trait Definitions extends api.StandardDefinitions {
       case _                         => tp
     }
 
-    def unapplyUnwrap(tpe:Type) = tpe.finalResultType.normalize match {
-      case RefinedType(p :: _, _) => p.normalize
+    def unapplyUnwrap(tpe:Type) = tpe.finalResultType.dealiasWiden match {
+      case RefinedType(p :: _, _) => p.dealiasWiden
       case tp                     => tp
     }
 
-    def abstractFunctionForFunctionType(tp: Type) =
-      if (isFunctionType(tp)) abstractFunctionType(tp.typeArgs.init, tp.typeArgs.last)
-      else NoType
+    def abstractFunctionForFunctionType(tp: Type) = {
+      assert(isFunctionType(tp), tp)
+      abstractFunctionType(tp.typeArgs.init, tp.typeArgs.last)
+    }
 
-    def isFunctionType(tp: Type): Boolean = tp.normalize match {
+    def isFunctionType(tp: Type): Boolean = tp.dealiasWiden match {
       case TypeRef(_, sym, args) if args.nonEmpty =>
         val arity = args.length - 1   // -1 is the return type
         arity <= MaxFunctionArity && sym == FunctionClass(arity)
@@ -684,9 +684,22 @@ trait Definitions extends api.StandardDefinitions {
     def scalaRepeatedType(arg: Type) = appliedType(RepeatedParamClass, arg)
     def seqType(arg: Type)           = appliedType(SeqClass, arg)
 
-    def ClassType(arg: Type) =
-      if (phase.erasedTypes || forMSIL) ClassClass.tpe
-      else appliedType(ClassClass, arg)
+    def ClassType(arg: Type) = if (phase.erasedTypes) ClassClass.tpe else appliedType(ClassClass, arg)
+
+    /** Can we tell by inspecting the symbol that it will never
+     *  at any phase have type parameters?
+     */
+    def neverHasTypeParameters(sym: Symbol) = sym match {
+      case _: RefinementClassSymbol => true
+      case _: ModuleClassSymbol     => true
+      case _: ImplClassSymbol       => true
+      case _                        =>
+        (
+             sym.isPrimitiveValueClass
+          || sym.isAnonymousClass
+          || sym.initialize.isMonomorphicType
+        )
+    }
 
     def EnumType(sym: Symbol) =
       // given (in java): "class A { enum E { VAL1 } }"
@@ -702,35 +715,10 @@ trait Definitions extends api.StandardDefinitions {
      *    C[E1, ..., En] forSome { E1 >: LB1 <: UB1 ... en >: LBn <: UBn }.
      */
     def classExistentialType(clazz: Symbol): Type =
-      newExistentialType(clazz.typeParams, clazz.tpe_*)
+      existentialAbstraction(clazz.typeParams, clazz.tpe_*)
 
-    //
-    // .NET backend
-    //
-
-    lazy val ComparatorClass = getRequiredClass("scala.runtime.Comparator")
-    // System.MulticastDelegate
-    lazy val DelegateClass: ClassSymbol = getClassByName(sn.Delegate)
-    var Delegate_scalaCallers: List[Symbol] = List() // Syncnote: No protection necessary yet as only for .NET where reflection is not supported.
-    // Symbol -> (Symbol, Type): scalaCaller -> (scalaMethodSym, DelegateType)
-    // var Delegate_scalaCallerInfos: HashMap[Symbol, (Symbol, Type)] = _
-    lazy val Delegate_scalaCallerTargets: mutable.HashMap[Symbol, Symbol] = mutable.HashMap()
-
-    def isCorrespondingDelegate(delegateType: Type, functionType: Type): Boolean = {
-      isSubType(delegateType, DelegateClass.tpe) &&
-      (delegateType.member(nme.apply).tpe match {
-      	case MethodType(delegateParams, delegateReturn) =>
-      	  isFunctionType(functionType) &&
-      	  (functionType.normalize match {
-      	    case TypeRef(_, _, args) =>
-      	      (delegateParams.map(pt => {
-                      if (pt.tpe == AnyClass.tpe) definitions.ObjectClass.tpe else pt})
-      	       ::: List(delegateReturn)) == args
-      	    case _ => false
-      	  })
-        case _ => false
-      })
-    }
+    def unsafeClassExistentialType(clazz: Symbol): Type =
+      existentialAbstraction(clazz.unsafeTypeParams, clazz.tpe_*)
 
     // members of class scala.Any
     lazy val Any_==       = enterNewMethod(AnyClass, nme.EQ, anyparam, booltype, FINAL)
@@ -892,8 +880,7 @@ trait Definitions extends api.StandardDefinitions {
 
     lazy val BeanPropertyAttr           = requiredClass[scala.beans.BeanProperty]
     lazy val BooleanBeanPropertyAttr    = requiredClass[scala.beans.BooleanBeanProperty]
-    lazy val CloneableAttr              = requiredClass[scala.annotation.cloneable]
-    lazy val CompileTimeOnlyAttr        = getClassIfDefined("scala.reflect.macros.compileTimeOnly")
+    lazy val CompileTimeOnlyAttr        = getClassIfDefined("scala.reflect.internal.annotations.compileTimeOnly")
     lazy val DeprecatedAttr             = requiredClass[scala.deprecated]
     lazy val DeprecatedNameAttr         = requiredClass[scala.deprecatedName]
     lazy val DeprecatedInheritanceAttr  = requiredClass[scala.deprecatedInheritance]
@@ -917,6 +904,7 @@ trait Definitions extends api.StandardDefinitions {
     lazy val GetterTargetClass          = requiredClass[meta.getter]
     lazy val ParamTargetClass           = requiredClass[meta.param]
     lazy val SetterTargetClass          = requiredClass[meta.setter]
+    lazy val ObjectTargetClass          = requiredClass[meta.companionObject]
     lazy val ClassTargetClass           = requiredClass[meta.companionClass]
     lazy val MethodTargetClass          = requiredClass[meta.companionMethod]    // TODO: module, moduleClass? package, packageObject?
     lazy val LanguageFeatureAnnot       = requiredClass[meta.languageFeature]
@@ -936,11 +924,21 @@ trait Definitions extends api.StandardDefinitions {
       // Trying to allow for deprecated locations
       sym.isAliasType && isMetaAnnotation(sym.info.typeSymbol)
     )
-    lazy val metaAnnotations = Set[Symbol](
-      FieldTargetClass, ParamTargetClass,
-      GetterTargetClass, SetterTargetClass,
-      BeanGetterTargetClass, BeanSetterTargetClass
-    )
+    lazy val metaAnnotations: Set[Symbol] = getPackage("scala.annotation.meta").info.members filter (_ isSubClass StaticAnnotationClass) toSet
+
+    // According to the scala.annotation.meta package object:
+    // * By default, annotations on (`val`-, `var`- or plain) constructor parameters
+    // * end up on the parameter, not on any other entity. Annotations on fields
+    // * by default only end up on the field.
+    def defaultAnnotationTarget(t: Tree): Symbol = t match {
+      case ClassDef(_, _, _, _)                                  => ClassTargetClass
+      case ModuleDef(_, _, _)                                    => ObjectTargetClass
+      case vd @ ValDef(_, _, _, _) if vd.symbol.isParamAccessor  => ParamTargetClass
+      case vd @ ValDef(_, _, _, _) if vd.symbol.isValueParameter => ParamTargetClass
+      case ValDef(_, _, _, _)                                    => FieldTargetClass
+      case DefDef(_, _, _, _, _, _)                              => MethodTargetClass
+      case _                                                     => GetterTargetClass
+    }
 
     lazy val AnnotationDefaultAttr: ClassSymbol = {
       val attr = enterNewClass(RuntimePackageClass, tpnme.AnnotationDefaultATTR, List(AnnotationClass.tpe))
@@ -1075,8 +1073,7 @@ trait Definitions extends api.StandardDefinitions {
       AnyValClass,
       NullClass,
       NothingClass,
-      SingletonClass,
-      EqualsPatternClass
+      SingletonClass
     )
     /** Lists core methods that don't have underlying bytecode, but are synthesized on-the-fly in every reflection universe */
     lazy val syntheticCoreMethods = List(
@@ -1146,10 +1143,10 @@ trait Definitions extends api.StandardDefinitions {
       }
       def flatNameString(sym: Symbol, separator: Char): String =
         if (sym == NoSymbol) ""   // be more resistant to error conditions, e.g. neg/t3222.scala
-        else if (sym.owner.isPackageClass) sym.javaClassName
+        else if (sym.isTopLevel) sym.javaClassName
         else flatNameString(sym.owner, separator) + nme.NAME_JOIN_STRING + sym.simpleName
       def signature1(etp: Type): String = {
-        if (etp.typeSymbol == ArrayClass) "[" + signature1(erasure(etp.normalize.typeArgs.head))
+        if (etp.typeSymbol == ArrayClass) "[" + signature1(erasure(etp.dealiasWiden.typeArgs.head))
         else if (isPrimitiveValueClass(etp.typeSymbol)) abbrvTag(etp.typeSymbol).toString()
         else "L" + flatNameString(etp.typeSymbol, '/') + ";"
       }
@@ -1164,27 +1161,5 @@ trait Definitions extends api.StandardDefinitions {
       val _ = symbolsNotPresentInBytecode
       isInitialized = true
     } //init
-
-    var nbScalaCallers: Int = 0
-    def newScalaCaller(delegateType: Type): MethodSymbol = {
-      assert(forMSIL, "scalaCallers can only be created if target is .NET")
-      // object: reference to object on which to call (scala-)method
-      val paramTypes: List[Type] = List(ObjectClass.tpe)
-      val name = newTermName("$scalaCaller$$" + nbScalaCallers)
-      // tparam => resultType, which is the resultType of PolyType, i.e. the result type after applying the
-      // type parameter =-> a MethodType in this case
-      // TODO: set type bounds manually (-> MulticastDelegate), see newTypeParam
-      val newCaller = enterNewMethod(DelegateClass, name, paramTypes, delegateType, FINAL | STATIC)
-      // val newCaller = newPolyMethod(DelegateClass, name,
-      // tparam => MethodType(paramTypes, tparam.typeConstructor)) setFlag (FINAL | STATIC)
-      Delegate_scalaCallers = Delegate_scalaCallers ::: List(newCaller)
-      nbScalaCallers += 1
-      newCaller
-    }
-
-    def addScalaCallerInfo(scalaCaller: Symbol, methSym: Symbol) {
-      assert(Delegate_scalaCallers contains scalaCaller)
-      Delegate_scalaCallerTargets += (scalaCaller -> methSym)
-    }
   }
 }

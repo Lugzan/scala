@@ -16,7 +16,6 @@ trait Analyzer extends AnyRef
             with Typers
             with Infer
             with Implicits
-            with Variances
             with EtaExpansion
             with SyntheticMethods
             with Unapplies
@@ -25,6 +24,7 @@ trait Analyzer extends AnyRef
             with TypeDiagnostics
             with ContextErrors
             with StdAttachments
+            with AnalyzerPlugins
 {
   val global : Global
   import global._

@@ -43,7 +43,7 @@ trait Infer extends Checkable {
       case formal => formal
     } else formals
     if (isVarArgTypes(formals1) && (removeRepeated || formals.length != nargs)) {
-      val ft = formals1.last.normalize.typeArgs.head
+      val ft = formals1.last.dealiasWiden.typeArgs.head
       formals1.init ::: (for (i <- List.range(formals1.length - 1, nargs)) yield ft)
     } else formals1
   }
@@ -75,22 +75,33 @@ trait Infer extends Checkable {
    * @throws TypeError when the unapply[Seq] definition is ill-typed
    * @returns (null, null) when the expected number of sub-patterns cannot be satisfied by the given extractor
    *
-   * From the spec:
+   * This is the spec currently implemented -- TODO: update it.
+   *
    *   8.1.8 ExtractorPatterns
    *
    *   An extractor pattern x(p1, ..., pn) where n ≥ 0 is of the same syntactic form as a constructor pattern.
    *   However, instead of a case class, the stable identifier x denotes an object which has a member method named unapply or unapplySeq that matches the pattern.
-   *   An unapply method in an object x matches the pattern x(p1, ..., pn) if it takes exactly one argument and one of the following applies:
    *
-   *   n = 0 and unapply’s result type is Boolean.
+   *   An `unapply` method with result type `R` in an object `x` matches the
+   *   pattern `x(p_1, ..., p_n)` if it takes exactly one argument and, either:
+   *     - `n = 0` and `R =:= Boolean`, or
+   *     - `n = 1` and `R <:< Option[T]`, for some type `T`.
+   *        The argument pattern `p1` is typed in turn with expected type `T`.
+   *     - Or, `n > 1` and `R <:< Option[Product_n[T_1, ..., T_n]]`, for some
+   *       types `T_1, ..., T_n`. The argument patterns `p_1, ..., p_n` are
+   *       typed with expected types `T_1, ..., T_n`.
    *
-   *   n = 1 and unapply’s result type is Option[T], for some type T.
-   *     the (only) argument pattern p1 is typed in turn with expected type T
+   *   An `unapplySeq` method in an object `x` matches the pattern `x(p_1, ..., p_n)`
+   *   if it takes exactly one argument and its result type is of the form `Option[S]`,
+   *   where either:
+   *     - `S` is a subtype of `Seq[U]` for some element type `U`, (set `m = 0`)
+   *     - or `S` is a `ProductX[T_1, ..., T_m]` and `T_m <: Seq[U]` (`m <= n`).
    *
-   *   n > 1 and unapply’s result type is Option[(T1, ..., Tn)], for some types T1, ..., Tn.
-   *     the argument patterns p1, ..., pn are typed in turn with expected types T1, ..., Tn
+   *   The argument patterns `p_1, ..., p_n` are typed with expected types
+   *   `T_1, ..., T_m, U, ..., U`. Here, `U` is repeated `n-m` times.
+   *
    */
-  def extractorFormalTypes(resTp: Type, nbSubPats: Int, unappSym: Symbol): (List[Type], List[Type]) = {
+  def extractorFormalTypes(pos: Position, resTp: Type, nbSubPats: Int, unappSym: Symbol): (List[Type], List[Type]) = {
     val isUnapplySeq     = unappSym.name == nme.unapplySeq
     val booleanExtractor = resTp.typeSymbolDirect == BooleanClass
 
@@ -100,24 +111,34 @@ trait Infer extends Checkable {
       else toRepeated
     }
 
+    // empty list --> error, otherwise length == 1
+    lazy val optionArgs = resTp.baseType(OptionClass).typeArgs
+    // empty list --> not a ProductN, otherwise product element types
+    def productArgs = getProductArgs(optionArgs.head)
+
     val formals =
-      if (nbSubPats == 0 && booleanExtractor && !isUnapplySeq)  Nil
-      else resTp.baseType(OptionClass).typeArgs match {
-        case optionTArg :: Nil =>
-          if (nbSubPats == 1)
-            if (isUnapplySeq) List(seqToRepeatedChecked(optionTArg))
-            else List(optionTArg)
-          // TODO: update spec to reflect we allow any ProductN, not just TupleN
-          else getProductArgs(optionTArg) match {
-            case Nil if isUnapplySeq => List(seqToRepeatedChecked(optionTArg))
-            case tps if isUnapplySeq => tps.init :+ seqToRepeatedChecked(tps.last)
-            case tps => tps
+      // convert Seq[T] to the special repeated argument type
+      // so below we can use formalTypes to expand formals to correspond to the number of actuals
+      if (isUnapplySeq) {
+        if (optionArgs.nonEmpty)
+          productArgs match {
+            case Nil => List(seqToRepeatedChecked(optionArgs.head))
+            case normalTps :+ seqTp => normalTps :+ seqToRepeatedChecked(seqTp)
           }
-        case _ =>
-          if (isUnapplySeq)
-            throw new TypeError(s"result type $resTp of unapplySeq defined in ${unappSym.owner+unappSym.owner.locationString} not in {Option[_], Some[_]}")
-          else
-            throw new TypeError(s"result type $resTp of unapply defined in ${unappSym.owner+unappSym.owner.locationString} not in {Boolean, Option[_], Some[_]}")
+        else throw new TypeError(s"result type $resTp of unapplySeq defined in ${unappSym.fullLocationString} does not conform to Option[_]")
+      } else {
+        if (booleanExtractor && nbSubPats == 0) Nil
+        else if (optionArgs.nonEmpty)
+          if (nbSubPats == 1) {
+            val productArity = productArgs.size
+            if (productArity > 1 && settings.lint.value)
+              global.currentUnit.warning(pos, s"extractor pattern binds a single value to a Product${productArity} of type ${optionArgs.head}")
+            optionArgs
+          }
+          // TODO: update spec to reflect we allow any ProductN, not just TupleN
+          else productArgs
+        else
+          throw new TypeError(s"result type $resTp of unapply defined in ${unappSym.fullLocationString} does not conform to Option[_] or Boolean")
       }
 
     // for unapplySeq, replace last vararg by as many instances as required by nbSubPats
@@ -198,7 +219,7 @@ trait Infer extends Checkable {
    *  @throws NoInstance
    */
   def solvedTypes(tvars: List[TypeVar], tparams: List[Symbol],
-                  variances: List[Int], upper: Boolean, depth: Int): List[Type] = {
+                  variances: List[Variance], upper: Boolean, depth: Int): List[Type] = {
 
     if (tvars.nonEmpty)
       printInference("[solve types] solving for " + tparams.map(_.name).mkString(", ") + " in " + tvars.mkString(", "))
@@ -220,7 +241,7 @@ trait Infer extends Checkable {
         // such as T <: T gets completed. See #360
         tvar.constr.inst = ErrorType
       else
-        assert(false, tvar.origin+" at "+tvar.origin.typeSymbol.owner)
+        abort(tvar.origin+" at "+tvar.origin.typeSymbol.owner)
     }
     tvars map instantiate
   }
@@ -237,6 +258,8 @@ trait Infer extends Checkable {
    *  This method seems to be performance critical.
    */
   def normalize(tp: Type): Type = tp match {
+    case pt @ PolyType(tparams, restpe) =>
+      logResult(s"Normalizing $tp in infer")(normalize(restpe))
     case mt @ MethodType(params, restpe) if mt.isImplicit =>
       normalize(restpe)
     case mt @ MethodType(_, restpe) if !mt.isDependentMethodType =>
@@ -249,8 +272,8 @@ trait Infer extends Checkable {
       tp1 // @MAT aliases already handled by subtyping
   }
 
-  private val stdErrorClass = rootMirror.RootClass.newErrorClass(tpnme.ERROR)
-  private val stdErrorValue = stdErrorClass.newErrorValue(nme.ERROR)
+  private lazy val stdErrorClass = rootMirror.RootClass.newErrorClass(tpnme.ERROR)
+  private lazy val stdErrorValue = stdErrorClass.newErrorValue(nme.ERROR)
 
   /** The context-dependent inferencer part */
   class Inferencer(context: Context) extends InferencerContextErrors with InferCheckable {
@@ -488,7 +511,7 @@ trait Infer extends Checkable {
                       pt: Type): List[Type] = {
       /** Map type variable to its instance, or, if `variance` is covariant/contravariant,
        *  to its upper/lower bound */
-      def instantiateToBound(tvar: TypeVar, variance: Int): Type = try {
+      def instantiateToBound(tvar: TypeVar, variance: Variance): Type = {
         lazy val hiBounds = tvar.constr.hiBounds
         lazy val loBounds = tvar.constr.loBounds
         lazy val upper = glb(hiBounds)
@@ -501,23 +524,21 @@ trait Infer extends Checkable {
         //Console.println("instantiate "+tvar+tvar.constr+" variance = "+variance);//DEBUG
         if (tvar.constr.inst != NoType)
           instantiate(tvar.constr.inst)
-        else if ((variance & COVARIANT) != 0 && hiBounds.nonEmpty)
-          setInst(upper)
-        else if ((variance & CONTRAVARIANT) != 0 && loBounds.nonEmpty)
+        else if (loBounds.nonEmpty && variance.isContravariant)
           setInst(lower)
-        else if (hiBounds.nonEmpty && loBounds.nonEmpty && upper <:< lower)
+        else if (hiBounds.nonEmpty && (variance.isPositive || loBounds.nonEmpty && upper <:< lower))
           setInst(upper)
         else
           WildcardType
-      } catch {
-        case ex: NoInstance => WildcardType
       }
       val tvars = tparams map freshVar
       if (isConservativelyCompatible(restpe.instantiateTypeParams(tparams, tvars), pt))
         map2(tparams, tvars)((tparam, tvar) =>
-          instantiateToBound(tvar, varianceInTypes(formals)(tparam)))
+          try instantiateToBound(tvar, varianceInTypes(formals)(tparam))
+          catch { case ex: NoInstance => WildcardType }
+        )
       else
-        tvars map (tvar => WildcardType)
+        tvars map (_ => WildcardType)
     }
 
     /** [Martin] Can someone comment this please? I have no idea what it's for
@@ -572,17 +593,16 @@ trait Infer extends Checkable {
       foreach3(tparams, tvars, targs) { (tparam, tvar, targ) =>
         val retract = (
               targ.typeSymbol == NothingClass                                         // only retract Nothings
-          && (restpe.isWildcard || (varianceInType(restpe)(tparam) & COVARIANT) == 0) // don't retract covariant occurrences
+          && (restpe.isWildcard || !varianceInType(restpe)(tparam).isPositive)  // don't retract covariant occurrences
         )
 
-        // checks !settings.XoldPatmat.value directly so one need not run under -Xexperimental to use virtpatmat
         buf += ((tparam,
           if (retract) None
           else Some(
             if (targ.typeSymbol == RepeatedParamClass)     targ.baseType(SeqClass)
             else if (targ.typeSymbol == JavaRepeatedParamClass) targ.baseType(ArrayClass)
             // this infers Foo.type instead of "object Foo" (see also widenIfNecessary)
-            else if (targ.typeSymbol.isModuleClass || ((settings.Xexperimental.value || !settings.XoldPatmat.value) && tvar.constr.avoidWiden)) targ
+            else if (targ.typeSymbol.isModuleClass || tvar.constr.avoidWiden) targ
             else targ.widen
           )
         ))
@@ -854,7 +874,7 @@ trait Infer extends Checkable {
           val lencmp = compareLengths(argtpes0, formals)
           if (lencmp > 0) tryTupleApply
           else if (lencmp == 0) {
-            // fast track if no named arguments are used
+              // fast track if no named arguments are used
             if (!containsNamedType(argtpes0))
               typesCompatible(argtpes0)
             else {
@@ -862,7 +882,7 @@ trait Infer extends Checkable {
               val (argtpes1, argPos, namesOK) = checkNames(argtpes0, params)
               // when using named application, the vararg param has to be specified exactly once
               (    namesOK
-                && (isIdentity(argPos) || sameLength(formals, params))
+                && (allArgsArePositional(argPos) || sameLength(formals, params))
                 && typesCompatible(reorderArgs(argtpes1, argPos)) // nb. arguments and names are OK, check if types are compatible
               )
             }
@@ -1066,22 +1086,22 @@ trait Infer extends Checkable {
 */
     /** error if arguments not within bounds. */
     def checkBounds(tree: Tree, pre: Type, owner: Symbol,
-                    tparams: List[Symbol], targs: List[Type], prefix: String): Boolean = {
-      //@M validate variances & bounds of targs wrt variances & bounds of tparams
-      //@M TODO: better place to check this?
-      //@M TODO: errors for getters & setters are reported separately
-      val kindErrors = checkKindBounds(tparams, targs, pre, owner)
-
-      if(!kindErrors.isEmpty) {
-        if (targs contains WildcardType) true
-        else { KindBoundErrors(tree, prefix, targs, tparams, kindErrors); false }
-      } else if (!isWithinBounds(pre, owner, tparams, targs)) {
-        if (!(targs exists (_.isErroneous)) && !(tparams exists (_.isErroneous))) {
-          NotWithinBounds(tree, prefix, targs, tparams, kindErrors)
-          false
-        } else true
-      } else true
-    }
+                    tparams: List[Symbol], targs: List[Type], prefix: String): Boolean =
+      if ((targs exists (_.isErroneous)) || (tparams exists (_.isErroneous))) true
+      else {
+        //@M validate variances & bounds of targs wrt variances & bounds of tparams
+        //@M TODO: better place to check this?
+        //@M TODO: errors for getters & setters are reported separately
+        val kindErrors = checkKindBounds(tparams, targs, pre, owner)
+        kindErrors match {
+          case Nil =>
+            def notWithinBounds() = NotWithinBounds(tree, prefix, targs, tparams, Nil)
+            isWithinBounds(pre, owner, tparams, targs) || {notWithinBounds(); false}
+          case errors =>
+            def kindBoundErrors() = KindBoundErrors(tree, prefix, targs, tparams, errors)
+            (targs contains WildcardType) || {kindBoundErrors(); false}
+        }
+      }
 
     def checkKindBounds(tparams: List[Symbol], targs: List[Type], pre: Type, owner: Symbol): List[String] = {
       checkKindBounds0(tparams, targs, pre, owner, true) map {
@@ -1123,15 +1143,17 @@ trait Infer extends Checkable {
      */
     def inferExprInstance(tree: Tree, tparams: List[Symbol], pt: Type = WildcardType, treeTp0: Type = null, keepNothings: Boolean = true, useWeaklyCompatible: Boolean = false): List[Symbol] = {
       val treeTp = if(treeTp0 eq null) tree.tpe else treeTp0 // can't refer to tree in default for treeTp0
+      val (targs, tvars) = exprTypeArgs(tparams, treeTp, pt, useWeaklyCompatible)
       printInference(
         ptBlock("inferExprInstance",
           "tree"    -> tree,
           "tree.tpe"-> tree.tpe,
           "tparams" -> tparams,
-          "pt"      -> pt
+          "pt"      -> pt,
+          "targs"   -> targs,
+          "tvars"   -> tvars
         )
       )
-      val (targs, tvars) = exprTypeArgs(tparams, treeTp, pt, useWeaklyCompatible)
 
       if (keepNothings || (targs eq null)) { //@M: adjustTypeArgs fails if targs==null, neg/t0226
         substExpr(tree, tparams, targs, pt)
@@ -1178,10 +1200,10 @@ trait Infer extends Checkable {
                             args: List[Tree], pt0: Type): List[Symbol] = fn.tpe match {
       case mt @ MethodType(params0, _) =>
         try {
-          val pt       = if (pt0.typeSymbol == UnitClass) WildcardType else pt0
-          val formals  = formalTypes(mt.paramTypes, args.length)
+          val pt      = if (pt0.typeSymbol == UnitClass) WildcardType else pt0
+          val formals = formalTypes(mt.paramTypes, args.length)
           val argtpes  = tupleIfNecessary(formals, args map (x => elimAnonymousClass(x.tpe.deconst)))
-          val restpe   = fn.tpe.resultType(argtpes)
+          val restpe  = fn.tpe.resultType(argtpes)
 
           val AdjustedTypeArgs.AllArgsAndUndets(okparams, okargs, allargs, leftUndet) =
             methTypeArgs(undetparams, formals, restpe, argtpes, pt)
@@ -1216,8 +1238,6 @@ trait Infer extends Checkable {
         }
     }
 
-    def widen(tp: Type): Type = abstractTypesToBounds(tp)
-
     /** Substitute free type variables `undetparams` of type constructor
      *  `tree` in pattern, given prototype `pt`.
      *
@@ -1226,7 +1246,7 @@ trait Infer extends Checkable {
      *  @param pt          the expected result type of the instance
      */
     def inferConstructorInstance(tree: Tree, undetparams: List[Symbol], pt0: Type) {
-      val pt       = widen(pt0)
+      val pt       = abstractTypesToBounds(pt0)
       val ptparams = freeTypeParamsOfTerms(pt)
       val ctorTp   = tree.tpe
       val resTp    = ctorTp.finalResultType
@@ -1290,13 +1310,13 @@ trait Infer extends Checkable {
 
       inferred match {
         case Some(targs) =>
-          new TreeTypeSubstituter(undetparams, targs).traverse(tree)
-          notifyUndetparamsInferred(undetparams, targs)
+        new TreeTypeSubstituter(undetparams, targs).traverse(tree)
+        notifyUndetparamsInferred(undetparams, targs)
         case _ =>
           def full = if (isFullyDefined(pt)) "(fully defined)" else "(not fully defined)"
           devWarning(s"failed inferConstructorInstance for $tree: ${tree.tpe} undet=$undetparams, pt=$pt $full")
-          // if (settings.explaintypes.value) explainTypes(resTp.instantiateTypeParams(undetparams, tvars), pt)
-          ConstrInstantiationError(tree, resTp, pt)
+        // if (settings.explaintypes.value) explainTypes(resTp.instantiateTypeParams(undetparams, tvars), pt)
+        ConstrInstantiationError(tree, resTp, pt)
       }
     }
 
@@ -1315,7 +1335,7 @@ trait Infer extends Checkable {
       val tvars1 = tvars map (_.cloneInternal)
       // Note: right now it's not clear that solving is complete, or how it can be made complete!
       // So we should come back to this and investigate.
-      solve(tvars1, tvars1 map (_.origin.typeSymbol), tvars1 map (x => COVARIANT), false)
+      solve(tvars1, tvars1 map (_.origin.typeSymbol), tvars1 map (_ => Variance.Covariant), false)
     }
 
     // this is quite nasty: it destructively changes the info of the syms of e.g., method type params (see #3692, where the type param T's bounds were set to >: T <: T, so that parts looped)
@@ -1365,7 +1385,7 @@ trait Infer extends Checkable {
     }
 
     def inferTypedPattern(tree0: Tree, pattp: Type, pt0: Type, canRemedy: Boolean): Type = {
-      val pt        = widen(pt0)
+      val pt        = abstractTypesToBounds(pt0)
       val ptparams  = freeTypeParamsOfTerms(pt)
       val tpparams  = freeTypeParamsOfTerms(pattp)
 
@@ -1438,9 +1458,9 @@ trait Infer extends Checkable {
     }
 
     object approximateAbstracts extends TypeMap {
-      def apply(tp: Type): Type = tp.normalize match {
+      def apply(tp: Type): Type = tp.dealiasWiden match {
         case TypeRef(pre, sym, _) if sym.isAbstractType => WildcardType
-        case _ => mapOver(tp)
+        case _                                          => mapOver(tp)
       }
     }
 
@@ -1492,26 +1512,32 @@ trait Infer extends Checkable {
      */
     def inferExprAlternative(tree: Tree, pt: Type) = tree.tpe match {
       case OverloadedType(pre, alts) => tryTwice { isSecondTry =>
-        val alts0 = alts filter (alt => isWeaklyCompatible(pre.memberType(alt), pt))
+        val alts0          = alts filter (alt => isWeaklyCompatible(pre.memberType(alt), pt))
         val alts1 = if (alts0.isEmpty) alts else alts0
 
         val bests = bestAlternatives(alts1) { (sym1, sym2) =>
           val tp1 = pre.memberType(sym1)
-          val tp2 = pre.memberType(sym2)
+            val tp2 = pre.memberType(sym2)
 
           (    tp2 == ErrorType
             || (!isWeaklyCompatible(tp2, pt) && isWeaklyCompatible(tp1, pt))
             || isStrictlyMoreSpecific(tp1, tp2, sym1, sym2)
           )
-        }
+            }
         // todo: missing test case for bests.isEmpty
         bests match {
           case best :: Nil                              => tree setSymbol best setType (pre memberType best)
-          case best :: competing :: _ if alts0.nonEmpty => if (!pt.isErroneous) AmbiguousExprAlternativeError(tree, pre, best, competing, pt, isSecondTry)
+          case best :: competing :: _ if alts0.nonEmpty => 
+            // SI-6912 Don't give up and leave an OverloadedType on the tree.
+            //         Originally I wrote this as `if (secondTry) ... `, but `tryTwice` won't attempt the second try
+            //         unless an error is issued. We're not issuing an error, in the assumption that it would be
+            //         spurious in light of the erroneous expected type
+            if (pt.isErroneous) setError(tree)
+            else AmbiguousExprAlternativeError(tree, pre, best, competing, pt, isSecondTry)
           case _                                        => if (bests.isEmpty || alts0.isEmpty) NoBestExprAlternativeError(tree, pt, isSecondTry)
+          }
         }
       }
-    }
 
     @inline private def inSilentMode(context: Context)(expr: => Boolean): Boolean = {
       val oldState = context.state
@@ -1555,7 +1581,7 @@ trait Infer extends Checkable {
       val namesMatch = namesOfNamedArguments(argtpes) match {
         case Nil   => Nil
         case names => eligible filter (m => names forall (name => m.info.params exists (p => paramMatchesName(p, name))))
-      }
+          }
       if (namesMatch.nonEmpty)
         namesMatch
       else if (eligible.isEmpty || eligible.tail.isEmpty)
@@ -1563,8 +1589,8 @@ trait Infer extends Checkable {
       else
         eligible filter (alt =>
           !alt.hasDefault && isApplicableBasedOnArity(alt.tpe, argtpes.length, varargsStar, tuplingAllowed = true)
-        )
-    }
+      )
+        }
 
     /** Assign `tree` the type of an alternative which is applicable
      *  to `argtpes`, and whose result type is compatible with `pt`.
@@ -1588,7 +1614,7 @@ trait Infer extends Checkable {
       val argtpes = argtpes0 mapConserve {
         case RepeatedType(tp) => varargsStar = true ; tp
         case tp               => tp
-      }
+            }
       def followType(sym: Symbol) = followApply(pre memberType sym)
       def bestForExpectedType(pt: Type, isLastTry: Boolean): Unit = {
         val applicable0 = alts filter (alt => inSilentMode(context)(isApplicable(undetparams, followType(alt), argtpes, pt)))
@@ -1601,8 +1627,8 @@ trait Infer extends Checkable {
           case best :: Nil               => tree setSymbol best setType (pre memberType best)           // success
           case Nil if pt eq WildcardType => NoBestMethodAlternativeError(tree, argtpes, pt, isLastTry)  // failed
           case Nil                       => bestForExpectedType(WildcardType, isLastTry)                // failed, but retry with WildcardType
-        }
-      }
+          }
+          }
       // This potentially makes up to four attempts: tryTwice may execute
       // with and without views enabled, and bestForExpectedType will try again
       // with pt = WildcardType if it fails with pt != WildcardType.
@@ -1610,7 +1636,7 @@ trait Infer extends Checkable {
         val pt = if (pt0.typeSymbol == UnitClass) WildcardType else pt0
         debuglog(s"infer method alt ${tree.symbol} with alternatives ${alts map pre.memberType} argtpes=$argtpes pt=$pt")
         bestForExpectedType(pt, isLastTry)
-      }
+        }
     }
 
     /** Try inference twice, once without views and once with views,

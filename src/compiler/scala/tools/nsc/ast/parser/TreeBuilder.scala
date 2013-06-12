@@ -171,15 +171,10 @@ abstract class TreeBuilder {
 
   /** Create tree representing (unencoded) binary operation expression or pattern. */
   def makeBinop(isExpr: Boolean, left: Tree, op: TermName, right: Tree, opPos: Position): Tree = {
-    def mkNamed(args: List[Tree]) =
-      if (isExpr) args map {
-        case a @ Assign(id @ Ident(name), rhs) =>
-          atPos(a.pos) { AssignOrNamedArg(id, rhs) }
-        case e => e
-      } else args
+    def mkNamed(args: List[Tree]) = if (isExpr) args map treeInfo.assignmentToMaybeNamedArg else args
     val arguments = right match {
       case Parens(args) => mkNamed(args)
-      case _ => List(right)
+      case _            => List(right)
     }
     if (isExpr) {
       if (treeInfo.isLeftAssoc(op)) {
@@ -201,20 +196,26 @@ abstract class TreeBuilder {
    */
   def makeAnonymousNew(stats: List[Tree]): Tree = {
     val stats1 = if (stats.isEmpty) List(Literal(Constant(()))) else stats
-    makeNew(Nil, emptyValDef, stats1, ListOfNil, NoPosition, NoPosition)
+    makeNew(Nil, emptyValDef, stats1, NoPosition, NoPosition)
   }
 
   /** Create positioned tree representing an object creation <new parents { stats }
    *  @param npos  the position of the new
    *  @param cpos  the position of the anonymous class starting with parents
    */
-  def makeNew(parents: List[Tree], self: ValDef, stats: List[Tree], argss: List[List[Tree]],
+  def makeNew(parents: List[Tree], self: ValDef, stats: List[Tree],
               npos: Position, cpos: Position): Tree =
     if (parents.isEmpty)
-      makeNew(List(scalaAnyRefConstr), self, stats, argss, npos, cpos)
-    else if (parents.tail.isEmpty && stats.isEmpty)
-      atPos(npos union cpos) { New(parents.head, argss) }
-    else {
+      makeNew(List(scalaAnyRefConstr), self, stats, npos, cpos)
+    else if (parents.tail.isEmpty && stats.isEmpty) {
+      // `Parsers.template` no longer differentiates tpts and their argss
+      // e.g. `C()` will be represented as a single tree Apply(Ident(C), Nil)
+      // instead of parents = Ident(C), argss = Nil as before
+      // this change works great for things that are actually templates
+      // but in this degenerate case we need to perform postprocessing
+      val app = treeInfo.dissectApplied(parents.head)
+      atPos(npos union cpos) { New(app.callee, app.argss) }
+    } else {
       val x = tpnme.ANON_CLASS_NAME
       atPos(npos union cpos) {
         Block(
@@ -222,12 +223,12 @@ abstract class TreeBuilder {
             atPos(cpos) {
               ClassDef(
                 Modifiers(FINAL), x, Nil,
-                Template(parents, self, NoMods, ListOfNil, argss, stats, cpos.focus))
+                Template(parents, self, NoMods, ListOfNil, stats, cpos.focus))
             }),
           atPos(npos) {
             New(
               Ident(x) setPos npos.focus,
-              ListOfNil)
+              Nil)
           }
         )
       }
@@ -248,7 +249,7 @@ abstract class TreeBuilder {
 
   /** Create tree representing a while loop */
   def makeWhile(lname: TermName, cond: Tree, body: Tree): Tree = {
-    val continu = atPos(o2p(body.pos.endOrPoint)) { Apply(Ident(lname), Nil) }
+    val continu = atPos(o2p(body.pos pointOrElse wrappingPos(List(cond, body)).pos.endOrPoint)) { Apply(Ident(lname), Nil) }
     val rhs = If(cond, Block(List(body), continu), Literal(Constant()))
     LabelDef(lname, Nil, rhs)
   }

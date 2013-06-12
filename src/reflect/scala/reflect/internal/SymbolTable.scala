@@ -15,6 +15,7 @@ abstract class SymbolTable extends macros.Universe
                               with Names
                               with Symbols
                               with Types
+                              with Variances
                               with Kinds
                               with ExistentialsAndSkolems
                               with FlagSets
@@ -38,6 +39,7 @@ abstract class SymbolTable extends macros.Universe
                               with StdAttachments
                               with StdCreators
                               with BuildUtils
+                              with PrivateWithin
 {
 
   val gen = new TreeGen { val global: SymbolTable.this.type = SymbolTable.this }
@@ -116,12 +118,6 @@ abstract class SymbolTable extends macros.Universe
    *  overridden in interactive.Global. */
   @elidable(elidable.WARNING)
   def assertCorrectThread() {}
-
-  /** Are we compiling for Java SE? */
-  // def forJVM: Boolean
-
-  /** Are we compiling for .NET? */
-  def forMSIL: Boolean = false
 
   /** A last effort if symbol in a select <owner>.<name> is not found.
    *  This is overridden by the reflection compiler to make up a package
@@ -344,6 +340,11 @@ abstract class SymbolTable extends macros.Universe
   @inline final def atPhase[T](ph: Phase)(op: => T): T = enteringPhase(ph)(op)
   @deprecated("Use enteringPhaseNotLaterThan", "2.10.0")
   @inline final def atPhaseNotLaterThan[T](target: Phase)(op: => T): T = enteringPhaseNotLaterThan(target)(op)
+
+  /**
+   * Adds the `sm` String interpolator to a [[scala.StringContext]].
+   */
+  implicit val StringContextStripMarginOps: StringContext => StringContextStripMarginOps = util.StringContextStripMarginOps
 }
 
 object SymbolTableStats {

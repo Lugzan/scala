@@ -126,11 +126,10 @@ private[reflect] trait JavaMirrors extends internal.SymbolTable with api.JavaUni
     private def ErrorStaticModule(sym: Symbol) = throw new ScalaReflectionException(s"$sym is a static module, use reflectModule on a RuntimeMirror to obtain its ModuleMirror")
     private def ErrorNotMember(sym: Symbol, owner: Symbol) = throw new ScalaReflectionException(s"expected a member of $owner, you provided ${sym.kindString} ${sym.fullName}")
     private def ErrorNotField(sym: Symbol) = throw new ScalaReflectionException(s"expected a field or an accessor method symbol, you provided $sym")
-    private def ErrorNonExistentField(sym: Symbol) = throw new ScalaReflectionException(s"""
-      |Scala field ${sym.name} isn't represented as a Java field, neither it has a Java accessor method
-      |note that private parameters of class constructors don't get mapped onto fields and/or accessors,
-      |unless they are used outside of their declaring constructors.
-    """.trim.stripMargin)
+    private def ErrorNonExistentField(sym: Symbol) = throw new ScalaReflectionException(
+      sm"""Scala field ${sym.name} isn't represented as a Java field, neither it has a Java accessor method
+          |note that private parameters of class constructors don't get mapped onto fields and/or accessors,
+          |unless they are used outside of their declaring constructors.""")
     private def ErrorSetImmutableField(sym: Symbol) = throw new ScalaReflectionException(s"cannot set an immutable field ${sym.name}")
     private def ErrorNotConstructor(sym: Symbol, owner: Symbol) = throw new ScalaReflectionException(s"expected a constructor of $owner, you provided $sym")
     private def ErrorFree(member: Symbol, freeType: Symbol) = throw new ScalaReflectionException(s"cannot reflect ${member.kindString} ${member.name}, because it's a member of a weak type ${freeType.name}")
@@ -283,6 +282,7 @@ private[reflect] trait JavaMirrors extends internal.SymbolTable with api.JavaUni
         if (!symbol.isMutable) ErrorSetImmutableField(symbol)
         jfield.set(receiver, value)
       }
+      def bind(newReceiver: Any) = new JavaFieldMirror(newReceiver, symbol)
       override def toString = s"field mirror for ${symbol.fullName} (bound to $receiver)"
     }
 
@@ -319,7 +319,7 @@ private[reflect] trait JavaMirrors extends internal.SymbolTable with api.JavaUni
     lazy val bytecodefulObjectMethods = Set[Symbol](Object_clone, Object_equals, Object_finalize, Object_hashCode, Object_toString,
                                         Object_notify, Object_notifyAll) ++ ObjectClass.info.member(nme.wait_).asTerm.alternatives.map(_.asMethod)
     private def isBytecodelessMethod(meth: MethodSymbol): Boolean = {
-      if (isGetClass(meth) || isStringConcat(meth) || meth.owner.isPrimitiveValueClass || meth == Predef_classOf || meth.isTermMacro) return true
+      if (isGetClass(meth) || isStringConcat(meth) || meth.owner.isPrimitiveValueClass || meth == Predef_classOf || meth.isMacro) return true
       bytecodelessMethodOwners(meth.owner) && !bytecodefulObjectMethods(meth)
     }
 
@@ -330,7 +330,16 @@ private[reflect] trait JavaMirrors extends internal.SymbolTable with api.JavaUni
     private def mkJavaMethodMirror[T: ClassTag](receiver: T, symbol: MethodSymbol): JavaMethodMirror = {
       if (isBytecodelessMethod(symbol)) new JavaBytecodelessMethodMirror(receiver, symbol)
       else if (symbol.paramss.flatten exists (p => isByNameParamType(p.info))) new JavaByNameMethodMirror(receiver, symbol)
-      else new JavaVanillaMethodMirror(receiver, symbol)
+      else {
+        symbol.paramss.flatten.length match {
+          case 0 => new JavaVanillaMethodMirror0(receiver, symbol)
+          case 1 => new JavaVanillaMethodMirror1(receiver, symbol)
+          case 2 => new JavaVanillaMethodMirror2(receiver, symbol)
+          case 3 => new JavaVanillaMethodMirror3(receiver, symbol)
+          case 4 => new JavaVanillaMethodMirror4(receiver, symbol)
+          case _ => new JavaVanillaMethodMirror(receiver, symbol)
+        }
+      }
     }
 
     private abstract class JavaMethodMirror(val symbol: MethodSymbol)
@@ -341,8 +350,10 @@ private[reflect] trait JavaMirrors extends internal.SymbolTable with api.JavaUni
         jmeth
       }
 
+      def jinvokeraw(jmeth: jMethod, receiver: Any, args: Seq[Any]) = jmeth.invoke(receiver, args.asInstanceOf[Seq[AnyRef]]: _*)
+
       def jinvoke(jmeth: jMethod, receiver: Any, args: Seq[Any]): Any = {
-        val result = jmeth.invoke(receiver, args.asInstanceOf[Seq[AnyRef]]: _*)
+        val result = jinvokeraw(jmeth, receiver, args)
         if (jmeth.getReturnType == java.lang.Void.TYPE) ()
         else result
       }
@@ -352,11 +363,43 @@ private[reflect] trait JavaMirrors extends internal.SymbolTable with api.JavaUni
 
     private class JavaVanillaMethodMirror(val receiver: Any, symbol: MethodSymbol)
             extends JavaMethodMirror(symbol) {
+      def bind(newReceiver: Any) = new JavaVanillaMethodMirror(newReceiver, symbol)
       def apply(args: Any*): Any = jinvoke(jmeth, receiver, args)
+    }
+
+    private class JavaVanillaMethodMirror0(receiver: Any, symbol: MethodSymbol)
+            extends JavaVanillaMethodMirror(receiver, symbol) {
+      override def bind(newReceiver: Any) = new JavaVanillaMethodMirror0(newReceiver, symbol)
+      override def jinvokeraw(jmeth: jMethod, receiver: Any, args: Seq[Any]) = jmeth.invoke(receiver)
+    }
+
+    private class JavaVanillaMethodMirror1(receiver: Any, symbol: MethodSymbol)
+            extends JavaVanillaMethodMirror(receiver, symbol) {
+      override def bind(newReceiver: Any) = new JavaVanillaMethodMirror1(newReceiver, symbol)
+      override def jinvokeraw(jmeth: jMethod, receiver: Any, args: Seq[Any]) = jmeth.invoke(receiver, args(0).asInstanceOf[AnyRef])
+    }
+
+    private class JavaVanillaMethodMirror2(receiver: Any, symbol: MethodSymbol)
+            extends JavaVanillaMethodMirror(receiver, symbol) {
+      override def bind(newReceiver: Any) = new JavaVanillaMethodMirror2(newReceiver, symbol)
+      override def jinvokeraw(jmeth: jMethod, receiver: Any, args: Seq[Any]) = jmeth.invoke(receiver, args(0).asInstanceOf[AnyRef], args(1).asInstanceOf[AnyRef])
+    }
+
+    private class JavaVanillaMethodMirror3(receiver: Any, symbol: MethodSymbol)
+            extends JavaVanillaMethodMirror(receiver, symbol) {
+      override def bind(newReceiver: Any) = new JavaVanillaMethodMirror3(newReceiver, symbol)
+      override def jinvokeraw(jmeth: jMethod, receiver: Any, args: Seq[Any]) = jmeth.invoke(receiver, args(0).asInstanceOf[AnyRef], args(1).asInstanceOf[AnyRef], args(2).asInstanceOf[AnyRef])
+    }
+
+    private class JavaVanillaMethodMirror4(receiver: Any, symbol: MethodSymbol)
+            extends JavaVanillaMethodMirror(receiver, symbol) {
+      override def bind(newReceiver: Any) = new JavaVanillaMethodMirror4(newReceiver, symbol)
+      override def jinvokeraw(jmeth: jMethod, receiver: Any, args: Seq[Any]) = jmeth.invoke(receiver, args(0).asInstanceOf[AnyRef], args(1).asInstanceOf[AnyRef], args(2).asInstanceOf[AnyRef], args(3).asInstanceOf[AnyRef])
     }
 
     private class JavaByNameMethodMirror(val receiver: Any, symbol: MethodSymbol)
             extends JavaMethodMirror(symbol) {
+      def bind(newReceiver: Any) = new JavaByNameMethodMirror(newReceiver, symbol)
       def apply(args: Any*): Any = {
         val transformed = map2(args.toList, symbol.paramss.flatten)((arg, param) => if (isByNameParamType(param.info)) () => arg else arg)
         jinvoke(jmeth, receiver, transformed)
@@ -365,6 +408,7 @@ private[reflect] trait JavaMirrors extends internal.SymbolTable with api.JavaUni
 
     private class JavaBytecodelessMethodMirror[T: ClassTag](val receiver: T, symbol: MethodSymbol)
             extends JavaMethodMirror(symbol) {
+       def bind(newReceiver: Any) = new JavaBytecodelessMethodMirror(newReceiver.asInstanceOf[T], symbol)
        def apply(args: Any*): Any = {
         // checking type conformance is too much of a hassle, so we don't do it here
         // actually it's not even necessary, because we manually dispatch arguments below
@@ -413,14 +457,15 @@ private[reflect] trait JavaMirrors extends internal.SymbolTable with api.JavaUni
           case sym if isStringConcat(sym)             => receiver.toString + objArg0
           case sym if sym.owner.isPrimitiveValueClass => invokePrimitiveMethod
           case sym if sym == Predef_classOf           => fail("Predef.classOf is a compile-time function")
-          case sym if sym.isTermMacro                 => fail(s"${symbol.fullName} is a macro, i.e. a compile-time function")
-          case _                                      => assert(false, this)
+          case sym if sym.isMacro                     => fail(s"${symbol.fullName} is a macro, i.e. a compile-time function")
+          case _                                      => abort(s"unsupported symbol $symbol when invoking $this")
         }
       }
     }
 
     private class JavaConstructorMirror(val outer: AnyRef, val symbol: MethodSymbol)
             extends MethodMirror {
+      def bind(newReceiver: Any) = new JavaConstructorMirror(newReceiver.asInstanceOf[AnyRef], symbol)
       override val receiver = outer
       lazy val jconstr = {
         val jconstr = constructorToJava(symbol)
@@ -462,11 +507,11 @@ private[reflect] trait JavaMirrors extends internal.SymbolTable with api.JavaUni
       def erasure = symbol.moduleClass.asClass
       def isStatic = true
       def instance = {
-        if (symbol.owner.isPackageClass)
+        if (symbol.isTopLevel)
           staticSingletonInstance(classLoader, symbol.fullName)
         else
           if (outer == null) staticSingletonInstance(classToJava(symbol.moduleClass.asClass))
-          else innerSingletonInstance(outer, symbol.name)
+          else innerSingletonInstance(outer, symbol.name.toString)
       }
       override def toString = s"module mirror for ${symbol.fullName} (bound to $outer)"
     }
@@ -535,8 +580,8 @@ private[reflect] trait JavaMirrors extends internal.SymbolTable with api.JavaUni
           val result = anns find (_.annotationType == annotClass)
           if (result.isEmpty && (anns exists (_.annotationType.getName == name)))
             throw new ClassNotFoundException(
-              s"""Mirror classloader mismatch: $jclazz (loaded by ${ReflectionUtils.show(jclazz.getClassLoader)})
-              |is unrelated to the mirror's classloader: (${ReflectionUtils.show(classLoader)})""".stripMargin)
+              sm"""Mirror classloader mismatch: $jclazz (loaded by ${ReflectionUtils.show(jclazz.getClassLoader)})
+                  |is unrelated to the mirror's classloader: (${ReflectionUtils.show(classLoader)})""")
           result
         }
       def loadBytes[T: ClassTag](name: String): Option[T] =
@@ -569,7 +614,7 @@ private[reflect] trait JavaMirrors extends internal.SymbolTable with api.JavaUni
               case None =>
                 // class does not have a Scala signature; it's a Java class
                 info("translating reflection info for Java " + jclazz) //debug
-                initClassModule(clazz, module, new FromJavaClassCompleter(clazz, module, jclazz))
+                initClassAndModule(clazz, module, new FromJavaClassCompleter(clazz, module, jclazz))
             }
         }
       } catch {
@@ -605,11 +650,19 @@ private[reflect] trait JavaMirrors extends internal.SymbolTable with api.JavaUni
 
     /**
      * Copy all annotations of Java annotated element `jann` over to Scala symbol `sym`.
+     * Also creates `@throws` annotations if necessary.
      *  Pre: `sym` is already initialized with a concrete type.
      *  Note: If `sym` is a method or constructor, its parameter annotations are copied as well.
      */
     private def copyAnnotations(sym: Symbol, jann: AnnotatedElement) {
       sym setAnnotations (jann.getAnnotations map JavaAnnotationProxy).toList
+      // SI-7065: we're not using getGenericExceptionTypes here to be consistent with ClassfileParser
+      val jexTpes = jann match {
+        case jm: jMethod => jm.getExceptionTypes.toList
+        case jconstr: jConstructor[_] => jconstr.getExceptionTypes.toList
+        case _ => Nil
+      }
+      jexTpes foreach (jexTpe => sym.addThrowsAnnotation(classSymbol(jexTpe)))
     }
 
     /**
@@ -626,6 +679,7 @@ private[reflect] trait JavaMirrors extends internal.SymbolTable with api.JavaUni
       /** used to avoid cycles while initializing classes */
       private var parentsLevel = 0
       private var pendingLoadActions: List[() => Unit] = Nil
+      private val relatedSymbols = clazz +: (if (module != NoSymbol) List(module, module.moduleClass) else Nil)
 
       override def load(sym: Symbol): Unit = {
         debugInfo("completing from Java " + sym + "/" + clazz.fullName)//debug
@@ -637,6 +691,7 @@ private[reflect] trait JavaMirrors extends internal.SymbolTable with api.JavaUni
           module.moduleClass setFlag (flags & PRIVATE | JAVA)
         }
 
+        relatedSymbols foreach (importPrivateWithinFromJavaFlags(_, jclazz.getModifiers))
         copyAnnotations(clazz, jclazz)
         // to do: annotations to set also for module?
 
@@ -671,9 +726,9 @@ private[reflect] trait JavaMirrors extends internal.SymbolTable with api.JavaUni
         def enter(sym: Symbol, mods: Int) =
           (if (jModifier.isStatic(mods)) module.moduleClass else clazz).info.decls enter sym
 
-        for (jinner <- jclazz.getDeclaredClasses) {
-          enter(jclassAsScala(jinner, clazz), jinner.getModifiers)
-        }
+        for (jinner <- jclazz.getDeclaredClasses)
+          jclassAsScala(jinner) // inner class is entered as a side-effect
+                                // no need to call enter explicitly
 
         pendingLoadActions = { () =>
 
@@ -935,8 +990,8 @@ private[reflect] trait JavaMirrors extends internal.SymbolTable with api.JavaUni
             javaTypeToValueClass(jclazz) orElse lookupClass
 
         assert (cls.isType,
-          s"""${if (cls == NoSymbol) "not a type: symbol" else "no symbol could be"}
-             | loaded from $jclazz in $owner with name $simpleName and classloader $classLoader""".stripMargin)
+          sm"""${if (cls == NoSymbol) "not a type: symbol" else "no symbol could be"}
+              | loaded from $jclazz in $owner with name $simpleName and classloader $classLoader""")
 
         cls.asClass
       }
@@ -1017,14 +1072,15 @@ private[reflect] trait JavaMirrors extends internal.SymbolTable with api.JavaUni
      *  @param jclazz  The Java class
      *  @return A Scala class symbol that wraps all reflection info of `jclazz`
      */
-    private def jclassAsScala(jclazz: jClass[_]): Symbol = jclassAsScala(jclazz, sOwner(jclazz))
+    private def jclassAsScala(jclazz: jClass[_]): ClassSymbol =
+      toScala(classCache, jclazz)(_ jclassAsScala1 _)
 
-    private def jclassAsScala(jclazz: jClass[_], owner: Symbol): ClassSymbol = {
+    private def jclassAsScala1(jclazz: jClass[_]): ClassSymbol = {
+      val owner = sOwner(jclazz)
       val name = scalaSimpleName(jclazz)
       val completer = (clazz: Symbol, module: Symbol) => new FromJavaClassCompleter(clazz, module, jclazz)
-      val (clazz, _) = createClassModule(owner, name, completer)
-      classCache enter (jclazz, clazz)
-      clazz
+
+      initAndEnterClassAndModule(owner, name, completer)._1
     }
 
     /**
@@ -1041,6 +1097,7 @@ private[reflect] trait JavaMirrors extends internal.SymbolTable with api.JavaUni
           .newValue(newTermName(jfield.getName), NoPosition, toScalaFieldFlags(jfield.getModifiers))
           .setInfo(typeToScala(jfield.getGenericType))
       fieldCache enter (jfield, field)
+      importPrivateWithinFromJavaFlags(field, jfield.getModifiers)
       copyAnnotations(field, jfield)
       field
     }
@@ -1066,6 +1123,7 @@ private[reflect] trait JavaMirrors extends internal.SymbolTable with api.JavaUni
       val paramtpes = jmeth.getGenericParameterTypes.toList map typeToScala
       val resulttpe = typeToScala(jmeth.getGenericReturnType)
       setMethType(meth, tparams, paramtpes, resulttpe)
+      importPrivateWithinFromJavaFlags(meth, jmeth.getModifiers)
       copyAnnotations(meth, jmeth)
       if ((jmeth.getModifiers & JAVA_ACC_VARARGS) != 0) meth.setInfo(arrayToRepeated(meth.info))
       meth
@@ -1089,6 +1147,7 @@ private[reflect] trait JavaMirrors extends internal.SymbolTable with api.JavaUni
       val paramtpes = jconstr.getGenericParameterTypes.toList map typeToScala
       setMethType(constr, tparams, paramtpes, clazz.tpe_*)
       constr setInfo GenPolyType(tparams, MethodType(clazz.newSyntheticValueParams(paramtpes), clazz.tpe))
+      importPrivateWithinFromJavaFlags(constr, jconstr.getModifiers)
       copyAnnotations(constr, jconstr)
       constr
     }
@@ -1110,11 +1169,11 @@ private[reflect] trait JavaMirrors extends internal.SymbolTable with api.JavaUni
         valueClassToJavaType(clazz)
       else if (clazz == ArrayClass)
         noClass
-      else if (clazz.owner.isPackageClass)
+      else if (clazz.isTopLevel)
         javaClass(clazz.javaClassName)
       else if (clazz.owner.isClass) {
         val childOfClass = !clazz.owner.isModuleClass
-        val childOfTopLevel = clazz.owner.owner.isPackageClass
+        val childOfTopLevel = clazz.owner.isTopLevel
         val childOfTopLevelObject = clazz.owner.isModuleClass && childOfTopLevel
 
         // suggested in https://issues.scala-lang.org/browse/SI-4023?focusedCommentId=54759#comment-54759

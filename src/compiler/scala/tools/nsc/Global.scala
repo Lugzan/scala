@@ -17,22 +17,17 @@ import scala.reflect.internal.util.{ NoPosition, OffsetPosition, SourceFile, NoS
 import scala.reflect.internal.pickling.{ PickleBuffer, PickleFormat }
 import symtab.{ Flags, SymbolTable, SymbolLoaders, SymbolTrackers }
 import symtab.classfile.Pickler
-import dependencies.DependencyAnalysis
 import plugins.Plugins
 import ast._
 import ast.parser._
 import typechecker._
 import transform._
 import backend.icode.{ ICodes, GenICode, ICodeCheckers }
-import backend.{ ScalaPrimitives, Platform, MSILPlatform, JavaPlatform }
-import backend.jvm.{GenJVM, GenASM}
+import backend.{ ScalaPrimitives, Platform, JavaPlatform }
+import backend.jvm.GenASM
 import backend.opt.{ Inliners, InlineExceptionHandlers, ClosureElimination, DeadCodeElimination }
 import backend.icode.analysis._
 import scala.language.postfixOps
-import scala.reflect.internal.StdAttachments
-import scala.reflect.ClassTag
-import scala.collection.mutable.ListBuffer
-import scala.tools.nsc.typechecker.MacrosStats.MacroDebugCodeGenerator
 
 class Global(var currentSettings: Settings, var reporter: Reporter)
     extends SymbolTable
@@ -84,8 +79,7 @@ class Global(var currentSettings: Settings, var reporter: Reporter)
   type ThisPlatform = Platform { val global: Global.this.type }
 
   lazy val platform: ThisPlatform =
-    if (forMSIL) new { val global: Global.this.type = Global.this } with MSILPlatform
-    else new { val global: Global.this.type = Global.this } with JavaPlatform
+    new { val global: Global.this.type = Global.this } with JavaPlatform
 
   type PlatformClassPath = ClassPath[platform.BinaryRepr]
   type OptClassPath = Option[PlatformClassPath]
@@ -236,13 +230,17 @@ class Global(var currentSettings: Settings, var reporter: Reporter)
   // of assert and require (but for now I've reproduced them here,
   // because there are a million to fix.)
   @inline final def assert(assertion: Boolean, message: => Any) {
-    Predef.assert(assertion, supplementErrorMessage("" + message))
+    // calling Predef.assert would send a freshly allocated closure wrapping the one received as argument.
+    if (!assertion)
+      throw new java.lang.AssertionError("assertion failed: "+ supplementErrorMessage("" + message))
   }
   @inline final def assert(assertion: Boolean) {
     assert(assertion, "")
   }
   @inline final def require(requirement: Boolean, message: => Any) {
-    Predef.require(requirement, supplementErrorMessage("" + message))
+    // calling Predef.require would send a freshly allocated closure wrapping the one received as argument.
+    if (!requirement)
+      throw new IllegalArgumentException("requirement failed: "+ supplementErrorMessage("" + message))
   }
   @inline final def require(requirement: Boolean) {
     require(requirement, "")
@@ -293,7 +291,9 @@ class Global(var currentSettings: Settings, var reporter: Reporter)
       log(msg)
   }
 
-  def logThrowable(t: Throwable): Unit = globalError(throwableAsString(t))
+  @deprecated("Renamed to reportThrowable", "2.10.1")
+  def logThrowable(t: Throwable): Unit = reportThrowable(t)
+  def reportThrowable(t: Throwable): Unit = globalError(throwableAsString(t))
   override def throwableAsString(t: Throwable) = util.stackTraceString(t)
 
 // ------------ File interface -----------------------------------------
@@ -332,9 +332,6 @@ class Global(var currentSettings: Settings, var reporter: Reporter)
       new SourceReader(charset.newDecoder(), reporter)
     }
   }
-
-  if (!dependencyAnalysis.off)
-    dependencyAnalysis.loadDependencyAnalysis()
 
   if (settings.verbose.value || settings.Ylogcp.value) {
     // Uses the "do not truncate" inform
@@ -586,7 +583,7 @@ class Global(var currentSettings: Settings, var reporter: Reporter)
     val runsRightAfter = None
   } with Inliners
 
-  // phaseName = "inlineExceptionHandlers"
+  // phaseName = "inlinehandlers"
   object inlineExceptionHandlers extends {
     val global: Global.this.type = Global.this
     val runsAfter = List("inliner")
@@ -596,7 +593,7 @@ class Global(var currentSettings: Settings, var reporter: Reporter)
   // phaseName = "closelim"
   object closureElimination extends {
     val global: Global.this.type = Global.this
-    val runsAfter = List("inlineExceptionHandlers")
+    val runsAfter = List("inlinehandlers")
     val runsRightAfter = None
   } with ClosureElimination
 
@@ -607,13 +604,6 @@ class Global(var currentSettings: Settings, var reporter: Reporter)
     val runsRightAfter = None
   } with DeadCodeElimination
 
-  // phaseName = "jvm", FJBG-based version
-  object genJVM extends {
-    val global: Global.this.type = Global.this
-    val runsAfter = List("dce")
-    val runsRightAfter = None
-  } with GenJVM
-
   // phaseName = "jvm", ASM-based version
   object genASM extends {
     val global: Global.this.type = Global.this
@@ -621,19 +611,11 @@ class Global(var currentSettings: Settings, var reporter: Reporter)
     val runsRightAfter = None
   } with GenASM
 
-  // This phase is optional: only added if settings.make option is given.
-  // phaseName = "dependencyAnalysis"
-  object dependencyAnalysis extends {
-    val global: Global.this.type = Global.this
-    val runsAfter = List("jvm")
-    val runsRightAfter = None
-  } with DependencyAnalysis
-
   // phaseName = "terminal"
   object terminal extends {
     val global: Global.this.type = Global.this
     val phaseName = "terminal"
-    val runsAfter = List("jvm", "msil")
+    val runsAfter = List("jvm")
     val runsRightAfter = None
   } with SubComponent {
     private var cache: Option[GlobalPhase] = None
@@ -738,7 +720,6 @@ class Global(var currentSettings: Settings, var reporter: Reporter)
   /* The set of phase objects that is the basis for the compiler phase chain */
   protected lazy val phasesSet     = new mutable.HashSet[SubComponent]
   protected lazy val phasesDescMap = new mutable.HashMap[SubComponent, String] withDefaultValue ""
-  private lazy val phaseTimings = new Phases.TimingModel   // tracking phase stats
 
   protected def addToPhasesSet(sub: SubComponent, descr: String) {
     phasesSet += sub
@@ -753,13 +734,41 @@ class Global(var currentSettings: Settings, var reporter: Reporter)
 
   /** A description of the phases that will run */
   def phaseDescriptions: String = {
-    val width = phaseNames map (_.length) max
-    val fmt   = "%" + width + "s  %2s  %s\n"
+    val Limit   = 16    // phase names should not be absurdly long
+    val MaxCol  = 80    // because some of us edit on green screens
+    val maxName = (0 /: phaseNames)(_ max _.length)
+    val width   = maxName min Limit
+    val maxDesc = MaxCol - (width + 6)  // descriptions not novels
+    val fmt     = if (settings.verbose.value) s"%${maxName}s  %2s  %s%n"
+                  else s"%${width}.${width}s  %2s  %.${maxDesc}s%n"
 
     val line1 = fmt.format("phase name", "id", "description")
     val line2 = fmt.format("----------", "--", "-----------")
+
+    // built-in string precision merely truncates
+    import java.util.{ Formattable, FormattableFlags, Formatter }
+    def fmtable(s: String) = new Formattable {
+      override def formatTo(formatter: Formatter, flags: Int, width: Int, precision: Int) {
+        val p = elliptically(s, precision)
+        val w = if (width > 0 && p.length < width) {
+          import FormattableFlags.LEFT_JUSTIFY
+          val leftly = (flags & LEFT_JUSTIFY) == LEFT_JUSTIFY
+          val sb = new StringBuilder
+          def pad() = 1 to width - p.length foreach (_ => sb.append(' '))
+          if (!leftly) pad()
+          sb.append(p)
+          if (leftly) pad()
+          sb.toString
+        } else p
+        formatter.out.append(w)
+      }
+    }
+    def elliptically(s: String, max: Int) =
+      if (max < 0 || s.length <= max) s
+      else if (max < 4) s.take(max)
+      else s.take(max - 3) + "..."
     val descs = phaseDescriptors.zipWithIndex map {
-      case (ph, idx) => fmt.format(ph.phaseName, idx + 1, phasesDescMap(ph))
+      case (ph, idx) => fmt.format(fmtable(ph.phaseName), idx + 1, fmtable(phasesDescMap(ph)))
     }
     line1 :: line2 :: descs mkString
   }
@@ -1105,37 +1114,41 @@ class Global(var currentSettings: Settings, var reporter: Reporter)
   /** Don't want to introduce new errors trying to report errors,
    *  so swallow exceptions.
    */
-  override def supplementErrorMessage(errorMessage: String): String = try {
-    val tree      = analyzer.lastTreeToTyper
-    val sym       = tree.symbol
-    val tpe       = tree.tpe
-    val enclosing = lastSeenContext.enclClassOrMethod.tree
+  override def supplementErrorMessage(errorMessage: String): String =
+    if (currentRun.supplementedError) errorMessage
+    else try {
+      val tree      = analyzer.lastTreeToTyper
+      val sym       = tree.symbol
+      val tpe       = tree.tpe
+      val enclosing = lastSeenContext.enclClassOrMethod.tree
 
-    val info1 = formatExplain(
-      "while compiling"    -> currentSource.path,
-      "during phase"       -> ( if (globalPhase eq phase) phase else "global=%s, enteringPhase=%s".format(globalPhase, phase) ),
-      "library version"    -> scala.util.Properties.versionString,
-      "compiler version"   -> Properties.versionString,
-      "reconstructed args" -> settings.recreateArgs.mkString(" ")
-    )
-    val info2 = formatExplain(
-      "last tree to typer" -> tree.summaryString,
-      "symbol"             -> Option(sym).fold("null")(_.debugLocationString),
-      "symbol definition"  -> Option(sym).fold("null")(_.defString),
-      "tpe"                -> tpe,
-      "symbol owners"      -> ownerChainString(sym),
-      "context owners"     -> ownerChainString(lastSeenContext.owner)
-    )
-    val info3: List[String] = (
-         ( List("== Enclosing template or block ==", nodePrinters.nodeToString(enclosing).trim) )
-      ++ ( if (tpe eq null) Nil else List("== Expanded type of tree ==", typeDeconstruct.show(tpe)) )
-      ++ ( if (!settings.debug.value) Nil else List("== Current unit body ==", nodePrinters.nodeToString(currentUnit.body)) )
-      ++ ( List(errorMessage) )
-    )
+      val info1 = formatExplain(
+        "while compiling"    -> currentSource.path,
+        "during phase"       -> ( if (globalPhase eq phase) phase else "global=%s, enteringPhase=%s".format(globalPhase, phase) ),
+        "library version"    -> scala.util.Properties.versionString,
+        "compiler version"   -> Properties.versionString,
+        "reconstructed args" -> settings.recreateArgs.mkString(" ")
+      )
+      val info2 = formatExplain(
+        "last tree to typer" -> tree.summaryString,
+        "symbol"             -> Option(sym).fold("null")(_.debugLocationString),
+        "symbol definition"  -> Option(sym).fold("null")(_.defString),
+        "tpe"                -> tpe,
+        "symbol owners"      -> ownerChainString(sym),
+        "context owners"     -> ownerChainString(lastSeenContext.owner)
+      )
+      val info3: List[String] = (
+           ( List("== Enclosing template or block ==", nodePrinters.nodeToString(enclosing).trim) )
+        ++ ( if (tpe eq null) Nil else List("== Expanded type of tree ==", typeDeconstruct.show(tpe)) )
+        ++ ( if (!settings.debug.value) Nil else List("== Current unit body ==", nodePrinters.nodeToString(currentUnit.body)) )
+        ++ ( List(errorMessage) )
+      )
 
-    ("\n" + info1) :: info2 :: info3 mkString "\n\n"
-  }
-  catch { case x: Exception => errorMessage }
+      currentRun.supplementedError = true
+
+      ("\n" + info1) :: info2 :: info3 mkString "\n\n"
+    }
+    catch { case x: Exception => errorMessage }
 
   /** The id of the currently active run
    */
@@ -1149,13 +1162,13 @@ class Global(var currentSettings: Settings, var reporter: Reporter)
 
   /** Collects for certain classes of warnings during this run. */
   class ConditionalWarning(what: String, option: Settings#BooleanSetting) {
-    val warnings = new mutable.ListBuffer[(Position, String)]
+    val warnings = mutable.LinkedHashMap[Position, String]()
     def warn(pos: Position, msg: String) =
       if (option.value) reporter.warning(pos, msg)
-      else warnings += ((pos, msg))
+      else if (!(warnings contains pos)) warnings += ((pos, msg))
     def summarize() =
-      if (option.isDefault && warnings.nonEmpty)
-        reporter.warning(NoPosition, "there were %d %s warnings; re-run with %s for details".format(warnings.size, what, option.name))
+      if (warnings.nonEmpty && (option.isDefault || settings.fatalWarnings.value))
+        warning("there were %d %s warning(s); re-run with %s for details".format(warnings.size, what, option.name))
   }
 
   def newUnitParser(code: String)      = new syntaxAnalyzer.UnitParser(newCompilationUnit(code))
@@ -1193,6 +1206,9 @@ class Global(var currentSettings: Settings, var reporter: Reporter)
 
     /** To be initialized from firstPhase. */
     private var terminalPhase: Phase = NoPhase
+
+    /** Have we already supplemented the error message of a compiler crash? */
+    private[nsc] final var supplementedError = false
 
     private val unitbuf = new mutable.ListBuffer[CompilationUnit]
     val compiledFiles   = new mutable.HashSet[String]
@@ -1374,10 +1390,10 @@ class Global(var currentSettings: Settings, var reporter: Reporter)
     val cleanupPhase                 = phaseNamed("cleanup")
     val icodePhase                   = phaseNamed("icode")
     val inlinerPhase                 = phaseNamed("inliner")
-    val inlineExceptionHandlersPhase = phaseNamed("inlineExceptionHandlers")
+    val inlineExceptionHandlersPhase = phaseNamed("inlinehandlers")
     val closelimPhase                = phaseNamed("closelim")
     val dcePhase                     = phaseNamed("dce")
-    val jvmPhase                     = phaseNamed("jvm")
+    // val jvmPhase                     = phaseNamed("jvm")
     // val msilPhase                    = phaseNamed("msil")
 
     def runIsAt(ph: Phase)   = globalPhase.id == ph.id
@@ -1425,7 +1441,7 @@ class Global(var currentSettings: Settings, var reporter: Reporter)
     def compiles(sym: Symbol): Boolean =
       if (sym == NoSymbol) false
       else if (symSource.isDefinedAt(sym)) true
-      else if (!sym.owner.isPackageClass) compiles(sym.enclosingTopLevelClass)
+      else if (!sym.isTopLevel) compiles(sym.enclosingTopLevelClass)
       else if (sym.isModuleClass) compiles(sym.sourceModule)
       else false
 
@@ -1507,8 +1523,7 @@ class Global(var currentSettings: Settings, var reporter: Reporter)
     }
 
     /** Compile list of source files */
-    def compileSources(_sources: List[SourceFile]) {
-      val sources = dependencyAnalysis calculateFiles _sources.distinct
+    def compileSources(sources: List[SourceFile]) {
       // there is a problem already, e.g. a plugin was passed a bad option
       if (reporter.hasErrors)
         return
@@ -1554,7 +1569,6 @@ class Global(var currentSettings: Settings, var reporter: Reporter)
 
         // progress update
         informTime(globalPhase.description, startTime)
-        phaseTimings(globalPhase) = currentTime - startTime
         val shouldWriteIcode = (
              (settings.writeICode.isSetByUser && (settings.writeICode containsPhase globalPhase))
           || (!settings.Xprint.doAllPhases && (settings.Xprint containsPhase globalPhase) && runIsAtOptimiz)
@@ -1604,10 +1618,6 @@ class Global(var currentSettings: Settings, var reporter: Reporter)
       reportCompileErrors()
       symSource.keys foreach (x => resetPackageClass(x.owner))
       informTime("total", startTime)
-
-      // record dependency data
-      if (!dependencyAnalysis.off)
-        dependencyAnalysis.saveDependencyAnalysis()
 
       // Clear any sets or maps created via perRunCaches.
       perRunCaches.clearAll()
@@ -1742,22 +1752,36 @@ class Global(var currentSettings: Settings, var reporter: Reporter)
       }
     })
   }
-  // In order to not outright break code which overrides onlyPresentation (like sbt 0.7.5.RC0)
-  // I restored and deprecated it.  That would be enough to avoid the compilation
-  // failure, but the override wouldn't accomplish anything.  So now forInteractive
-  // and forScaladoc default to onlyPresentation, which is the same as defaulting
-  // to false except in old code.  The downside is that this leaves us calling a
-  // deprecated method: but I see no simple way out, so I leave it for now.
-  def forJVM           = settings.target.value startsWith "jvm"
-  override def forMSIL = settings.target.value startsWith "msil"
-  def forInteractive   = onlyPresentation
-  def forScaladoc      = onlyPresentation
+  def forInteractive   = false
+  def forScaladoc      = false
   def createJavadoc    = false
 
   /** Synthetic macro code */
   val macroDebugSyntheticCodeStorage = perRunCaches.newMap[String, ListBuffer[(Tree, Position)] ]()
+
   @deprecated("Use forInteractive or forScaladoc, depending on what you're after", "2.9.0")
   def onlyPresentation = false
+
+  def assemblyMacroError(pos: Position, msg: String): String = {
+
+    val sourceName = pos match {
+      case NoPosition => "[No source file]"
+      case p => p.source.toString
+    }
+    val macroNameSuffix = "_macro_debug$.expanded"
+    val (fileName, isTyper) = if (sourceName endsWith macroNameSuffix)
+      ((sourceName stripSuffix macroNameSuffix) + ".scala", false) else (sourceName, true)
+
+    macroDebugSyntheticCodeStorage get fileName match {
+      case Some(lst) => lst foreach {
+          case (tree, treePos) => if (treePos.includes(pos)&&isTyper || !isTyper&&tree.pos.includes(pos)) {
+          return msg + "\nIn expanded macro:\n" + tree.toString + "\nIn expression: \n"
+        }
+      }
+      msg
+      case _ => msg
+    }
+  }
 }
 
 object Global {
