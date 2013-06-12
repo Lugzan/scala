@@ -15,7 +15,7 @@ import java.lang.reflect.{Array => jArray, Method => jMethod}
 import scala.util.control.ControlThrowable
 import scala.reflect.macros.runtime.AbortMacroException
 import scala.tools.nsc.util.BatchSourceFile
-import java.io.{IOException, FileWriter}
+import java.io.{PrintWriter, IOException, FileWriter}
 import scala.reflect.io.{VirtualFile, PlainFile}
 import scala.collection.immutable.HashMap
 
@@ -1078,46 +1078,81 @@ object MacrosStats {
       found
     }
 
-    /**
-     * does nothing without -Yrangepos
-     * if the idea with parser doesn't work, modify this method
-     */
-    private def adjustTreePositions(newSourceFile: SourceFile, tree: global.Tree) {
-      tree.pos match {
-        case range: RangePosition if range.startOrPoint != range.endOrPoint =>
-        case _ => return
-      }
+    private def adjustTreePositions(newSourceFile: SourceFile, tree: global.Tree, oldPositions: Map[Int, global.Position]) {
+      if (!global.settings.Yrangepos.value) return
 
       val codeLength = newSourceFile.content.length
 
-      def shiftPosition(p: Position, shiftOff: Int) = p match {
+      def shiftPosition(p: Position, shiftOff: Int) = {
+//        assert(shiftOff < codeLength - 165)
+        p match {
+        case ar if shiftOff == 0 => ar
         case range: RangePosition =>
-          new RangePosition(newSourceFile, range.start + shiftOff, range.point + shiftOff, range.end + shiftOff)
-        case offset: OffsetPosition => new OffsetPosition(newSourceFile, offset.point + shiftOff)
+//          assert(range.end < 165)
+          new RangePosition(newSourceFile, range.start + shiftOff, range.point + shiftOff, range.end + shiftOff).focus
+        case offset: OffsetPosition =>
+//          val pnt = offset.point + shiftOff
+//          new RangePosition(newSourceFile, offset.point + shiftOff, offset.point + shiftOff, offset.point + shiftOff)
+          new OffsetPosition(newSourceFile, offset.point + shiftOff)
         case a => a
-      }
+      }}
 
       def shiftRightEdge(p: Position, shiftOff: Int, childOffset: Int) = {
         lazy val point = if (p.point < childOffset) p.point else p.point + shiftOff
         p match {
           case range: RangePosition => new RangePosition(newSourceFile, range.start, point, range.end + shiftOff)
-          case offset: OffsetPosition => new OffsetPosition(newSourceFile, point)
+          case offset: OffsetPosition =>
+            new RangePosition(newSourceFile, point, point, point)
           case a => a
         }
       }
 
-      def adjustMacroPos(tr: global.Tree, startShift: Int): Int = {
+      def adjustMacroPos(tr: global.Tree, startShift: Int, subtractOldLength: Boolean = false): Int = {
         var oldLength = 0
 
         tr pos_= (tr.pos match {
           case range: RangePosition =>
-            oldLength = range.end - range.start
-            new RangePosition(newSourceFile, range.start + startShift, range.start + startShift,
+            if (subtractOldLength) oldLength = range.end - range.start
+            var point = range.start + startShift
+
+            if (subtractOldLength && tr.pos != global.NoPosition && startShift < tr.pos.startOrPoint) {
+              tr match {
+                case global.Apply(fun, _) => fun.children.headOption map {
+                  case id => point += id.toString.length
+                }
+                case global.Assign(lhs, _) => point += lhs.toString.length
+                case global.AppliedTypeTree(tpt, _) =>
+                  val c = tpt.children
+                  if (c.length > 1) point += c(1).toString.length
+                case global.ValDef(_, name, _, _) => point += name.decode.length
+                case global.TypeDef(_, name, _, _) => point += name.decode.length
+                case global.Match(selector, _) => point += selector.toString.length
+                case global.Function(params, _) =>
+                  point += (0 /: params) {
+                    (i, tr) => i + tr.toString.length
+                  }
+                case global.TypeApply(fun, _) => point += fun.toString.length + 1 // + bracket
+                case global.Typed(expr, _) => point += expr.toString.length + 2 // + `(` + _
+                case global.DefDef(_, _, _, _, _, tpt, _) => point += tpt.toString.length
+                case _ =>
+              }
+            }
+
+            new RangePosition(newSourceFile, range.start + startShift, point,
               startShift + tr.toString.length + range.start)
+          case offset: OffsetPosition if subtractOldLength => oldPositions get offset.point match {
+            case Some(pos: RangePosition) => oldLength = pos.end - pos.start
+            case _ => //println("too bad")
+          }
+          shiftPosition(offset, startShift)
           case a => shiftPosition(a, startShift)
         })
 
         (startShift /: tr.children){ case (shift, child) => adjustMacroPos(child, shift) }
+
+//        (tr.children.iterator zip tr.children.tails) foreach {
+//          case (tr, tl) => global ensureNonOverlapping (tr, tl)
+//        }
 
         startShift + tr.toString.length - oldLength
       }
@@ -1137,7 +1172,7 @@ object MacrosStats {
             shiftOffset
           case Some(_) =>
             val childOffset = child.pos.startOrPoint
-            val macroShift = adjustMacroPos(child, shiftOffset)
+            val macroShift = adjustMacroPos(child, shiftOffset, true)
             parents foreach (p => p pos_= shiftRightEdge(p.pos, macroShift - shiftOffset, childOffset))
             macroShift
           case None =>
@@ -1257,7 +1292,6 @@ object MacrosStats {
 
             val newTree = constructTree(currentTree.toString.replace("<init>", "$init$")) //for debug, inline later
             newTree map ( mergeTrees(currentTree, _) )
-            println("ololo")
 
             currentShift + currentTree.toString.length - expandeeLength
           case _ =>
@@ -1274,7 +1308,7 @@ object MacrosStats {
     private def generateSyntheticSourceFile(cunit: global.CompilationUnit,
                                             needOutputToConsole: Boolean): Option[BatchSourceFile] = {
       val cname = cunit.source.toString()
-      val macroPrefix = "<[[macro:"  //s
+      val macroPrefix = global.currentSettings.YmacrodebugPrx //s
 
       val typeChecked = findAllExpanded(cunit.body)
 
@@ -1287,29 +1321,32 @@ object MacrosStats {
         case Some(lst) =>
           val sourcePath = cunit.source.file.canonicalPath
           val code = cunit.source.content
+          val allTrees = lst sortBy {
+            case (tree, pos) => pos.startOrPoint
+          }
 
           val genDelta =
-            (0 /: lst) {case (s, (expanded, pos)) => s + getTypeCheckedTreeText(expanded).length - pos.endOrPoint + pos.startOrPoint }
+            (0 /: allTrees) {case (s, (expanded, pos)) => s + getTypeCheckedTreeText(expanded).length - pos.endOrPoint + pos.startOrPoint }
 
           val finalSourceCodeMaxLength = code.length + genDelta
           val finalSourceCodeChars = new Array[Char](finalSourceCodeMaxLength)
 
-          val (sourcePos, generatedSourcePos) = ((0, 0) /: lst) {
+          val (sourcePos, generatedSourcePos) = ((0, 0) /: allTrees) {
             case ((sourcePos, generatedSourcePos), (expandedMacroSyn, macroPos)) =>
               import scala.collection.convert._
 
               //todo rename to class name (or rewrite .toString)
               val expandedMacroSynSrc = getTypeCheckedTreeText(expandedMacroSyn).replace("<init>", "$init$")
+              val pos: Int = macroPos.startOrPoint - sourcePos
 
-              System.arraycopy(code, sourcePos, finalSourceCodeChars, generatedSourcePos,
-                macroPos.startOrPoint - sourcePos)
+              System.arraycopy(code, sourcePos, finalSourceCodeChars, generatedSourcePos, pos)
               System.arraycopy(expandedMacroSynSrc.toCharArray, 0, finalSourceCodeChars,
-                generatedSourcePos + macroPos.startOrPoint - sourcePos, expandedMacroSynSrc.length)
+                generatedSourcePos + pos, expandedMacroSynSrc.length)
 
-              (macroPos.end, generatedSourcePos + expandedMacroSynSrc.length + macroPos.startOrPoint - sourcePos)
+              (macroPos.end, generatedSourcePos + expandedMacroSynSrc.length + pos)
           }
 
-          val (_, lastPos) = lst.last
+          val (_, lastPos) = allTrees.last
           System.arraycopy(code, sourcePos, finalSourceCodeChars, generatedSourcePos, code.length - lastPos.endOrPoint)
 
           var result: Option[BatchSourceFile] = None
@@ -1326,7 +1363,7 @@ object MacrosStats {
           if (needOutputToConsole) {
             val packedDebugInfo = new StringBuilder
 
-            lst foreach {
+            allTrees foreach {
               case (macroTree, pos) =>
                 packedDebugInfo ++= (macroTree.toString.length + ",") ++= (pos.startOrPoint + ",") ++= (pos.endOrPoint + "|")
             }
@@ -1345,15 +1382,15 @@ object MacrosStats {
 
     class MacroDebugCodeGenerationPhase(prev: scala.tools.nsc.Phase) extends StdPhase(prev) {
       def apply(unit: global.CompilationUnit) {
-        if (global.currentSettings.Ymacrodebug.value){
+        if (global.currentSettings.Ymacrodebug.value && global.settings.Yrangepos.value){
           generateSyntheticSourceFile(unit, true) match {
             case Some(file) =>
-              val refName = unit.source.toString()
-              val list = global.macroDebugSyntheticCodeStorage.get(refName).get
+              val list = global.macroDebugSyntheticCodeStorage.get(unit.source.toString()).get
+              val oldPositions = list.map { case (_, pos) => (pos.point, pos) }.toMap
 
               unit.source = file
-//              adjustTreePositions(file, unit.body)
-              adjustTreePositionsEx(file, unit.body, list)
+              adjustTreePositions(file, unit.body, oldPositions)
+//              adjustTreePositionsEx(file, unit.body, list)
             case _ =>
           }
 

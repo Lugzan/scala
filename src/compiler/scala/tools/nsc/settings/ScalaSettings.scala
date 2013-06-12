@@ -132,6 +132,7 @@ trait ScalaSettings extends AbsScalaSettings
   val Xdce            = BooleanSetting    ("-Ydead-code", "Perform dead code elimination.")
   val debug           = BooleanSetting    ("-Ydebug", "Increase the quantity of debugging output.")
   val Ymacrodebug     = BooleanSetting    ("-Ymacrodebug", "Generate info for macro debugging")
+  val YmacrodebugPrx  = StringSetting     ("-Ymacrodebug-prx", "prx", "String prefix for macro synth code", "<[[macro:")
   //val doc           = BooleanSetting    ("-Ydoc", "Generate documentation")
   val termConflict    = ChoiceSetting     ("-Yresolve-term-conflict", "strategy", "Resolve term conflicts", List("package", "object", "error"), "error")
   val inline          = BooleanSetting    ("-Yinline", "Perform inlining when possible.")
